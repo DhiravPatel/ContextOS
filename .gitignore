@@ -1,0 +1,13 @@
+target/
+node_modules/
+dist/
+out/
+*.vsix
+.vscode-test/
+Cargo.lock
+!/Cargo.lock
+.DS_Store
+*.log
+.env
+.idea/
+.vscode/settings.json

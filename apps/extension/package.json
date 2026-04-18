@@ -1,0 +1,98 @@
+{
+  "name": "contextos-vscode",
+  "displayName": "ContextOS",
+  "description": "Local-first token reduction for AI coding assistants. Cut context tokens ≥50% without changing output quality.",
+  "version": "0.1.0",
+  "publisher": "contextos",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "ai",
+    "tokens",
+    "copilot",
+    "llm",
+    "context",
+    "compression"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "contextos.optimize",
+        "title": "ContextOS: Optimize Current Context",
+        "category": "ContextOS"
+      },
+      {
+        "command": "contextos.optimizeSelection",
+        "title": "ContextOS: Optimize Selection",
+        "category": "ContextOS"
+      },
+      {
+        "command": "contextos.showStats",
+        "title": "ContextOS: Show Session Stats",
+        "category": "ContextOS"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "contextos.optimize",
+        "key": "ctrl+alt+o",
+        "mac": "cmd+alt+o",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "ContextOS",
+      "properties": {
+        "contextos.maxTokens": {
+          "type": "number",
+          "default": 8000,
+          "description": "Token budget for optimized output."
+        },
+        "contextos.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the `contextos` CLI. Leave blank to auto-detect (looks on PATH, then bundled binary)."
+        },
+        "contextos.includeImports": {
+          "type": "boolean",
+          "default": true,
+          "description": "Collect imports from the active file as extra context chunks."
+        },
+        "contextos.includeOpenEditors": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include other visible editors in the context bundle."
+        },
+        "contextos.showReductionToast": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a notification with the token reduction after each run."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p .",
+    "watch": "tsc -p . --watch",
+    "package": "vsce package --no-dependencies",
+    "test": "tsc -p . && node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^2.24.0"
+  }
+}

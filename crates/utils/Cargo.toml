@@ -1,0 +1,13 @@
+[package]
+name = "contextos-utils"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ahash.workspace = true
+serde.workspace = true
+once_cell.workspace = true

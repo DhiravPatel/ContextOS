@@ -1,0 +1,32 @@
+[package]
+name = "contextos-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["tree-sitter-langs"]
+# Compiling tree-sitter grammars requires a C compiler on the build machine.
+# Users on locked-down CI can disable this feature and fall back to the
+# regex-based stripper that still gives 30-40% size reduction.
+tree-sitter-langs = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-python",
+]
+
+[dependencies]
+contextos-utils = { path = "../utils" }
+regex.workspace = true
+once_cell.workspace = true
+serde.workspace = true
+tree-sitter = { workspace = true, optional = true }
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
