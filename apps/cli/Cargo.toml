@@ -10,7 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 contextos-core-engine = { path = "../../crates/core-engine" }
+contextos-graph = { path = "../../crates/graph" }
+contextos-utils = { path = "../../crates/utils" }
+contextos-tokenizer = { path = "../../crates/tokenizer" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+notify.workspace = true
+crossbeam-channel.workspace = true
+walkdir.workspace = true

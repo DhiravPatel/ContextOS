@@ -33,6 +33,11 @@ pub struct InputChunk {
     /// "selected region", "file currently under cursor", etc.
     #[serde(default)]
     pub priority: i32,
+    /// If true, the engine will reduce this chunk to a signature-only
+    /// skeleton before dedup/rank/budget. Typical source: graph-picked
+    /// "transitive dependency, relevant but not central" files.
+    #[serde(default)]
+    pub skeleton_hint: bool,
 }
 
 fn default_lang() -> Language {

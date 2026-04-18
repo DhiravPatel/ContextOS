@@ -14,6 +14,7 @@ fn chunk(id: &str, lang: Language, content: &str) -> InputChunk {
         content: content.into(),
         kind: ChunkKind::Code,
         priority: 0,
+        skeleton_hint: false,
     }
 }
 

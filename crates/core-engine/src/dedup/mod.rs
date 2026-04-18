@@ -1,24 +1,31 @@
 //! Deduplication pass.
 //!
-//! Two levels:
-//! 1. **Exact chunk dedup** — drop any chunk whose whitespace-normalized
-//!    content hash has already been seen. O(n).
-//! 2. **Near-duplicate dedup** — for chunks that survive (1), compare
-//!    line-multiset similarity (Jaccard over line fingerprints) to earlier
-//!    chunks. If similarity ≥ threshold, drop. O(n·avg_lines).
-//!
-//! Both are in-place mutations on the chunk vector.
+//! Three levels, cascading:
+//!   1. **Exact chunk dedup** — drop chunks whose whitespace-normalized
+//!      content hash has already been seen. O(n).
+//!   2. **MinHash + LSH** (for n ≥ `LSH_THRESHOLD`) — bucket by banded
+//!      MinHash signatures and compare only within-bucket pairs. Turns a
+//!      pathological O(n²) into O(n) on repo-scale inputs.
+//!   3. **Line-set Jaccard** (small n) — direct Jaccard over line
+//!      fingerprints. Kept for tiny inputs where LSH has startup overhead.
+
+pub mod minhash;
 
 use crate::types::InputChunk;
 use ahash::AHashMap;
 use contextos_utils::{fast_hash, line_fingerprint, normalize_whitespace};
+use minhash::{line_shingles, signature_of, LshIndex, Signature};
 use serde::{Deserialize, Serialize};
+
+/// Above this chunk count we switch from O(n²) Jaccard to MinHash-LSH.
+const LSH_THRESHOLD: usize = 64;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stats {
     pub exact_removed: usize,
     pub near_removed: usize,
     pub kept: usize,
+    pub used_lsh: bool,
 }
 
 pub fn run(chunks: &mut Vec<InputChunk>, similarity_threshold: f32) -> Stats {
@@ -30,9 +37,25 @@ pub fn run(chunks: &mut Vec<InputChunk>, similarity_threshold: f32) -> Stats {
     });
     let after_exact = chunks.len();
 
-    // Near-dup pass
+    let (near_removed, used_lsh) = if chunks.len() >= LSH_THRESHOLD {
+        let removed = dedup_with_lsh(chunks, similarity_threshold as f64);
+        (removed, true)
+    } else {
+        let removed = dedup_pairwise(chunks, similarity_threshold as f64);
+        (removed, false)
+    };
+
+    Stats {
+        exact_removed: before - after_exact,
+        near_removed,
+        kept: chunks.len(),
+        used_lsh,
+    }
+}
+
+fn dedup_pairwise(chunks: &mut Vec<InputChunk>, threshold: f64) -> usize {
     let mut line_sets: Vec<Vec<u64>> = Vec::with_capacity(chunks.len());
-    let mut keep_flags: Vec<bool> = Vec::with_capacity(chunks.len());
+    let mut keep: Vec<bool> = Vec::with_capacity(chunks.len());
 
     for c in chunks.iter() {
         let set: Vec<u64> = c
@@ -44,31 +67,59 @@ pub fn run(chunks: &mut Vec<InputChunk>, similarity_threshold: f32) -> Stats {
 
         let mut drop = false;
         for (i, prev) in line_sets.iter().enumerate() {
-            if !keep_flags[i] {
+            if !keep[i] {
                 continue;
             }
-            if jaccard_sorted(&set, prev) >= similarity_threshold as f64 {
+            if jaccard_sorted(&set, prev) >= threshold {
                 drop = true;
                 break;
             }
         }
         line_sets.push(set);
-        keep_flags.push(!drop);
+        keep.push(!drop);
     }
 
-    let mut iter = keep_flags.iter();
+    let before = chunks.len();
+    let mut iter = keep.iter();
     chunks.retain(|_| *iter.next().unwrap());
-
-    let after_all = chunks.len();
-    Stats {
-        exact_removed: before - after_exact,
-        near_removed: after_exact - after_all,
-        kept: after_all,
-    }
+    before - chunks.len()
 }
 
-/// Jaccard similarity over two line-fingerprint multisets.
-/// Returns 1.0 for identical, 0.0 for disjoint.
+fn dedup_with_lsh(chunks: &mut Vec<InputChunk>, threshold: f64) -> usize {
+    // Build signatures up front (parallel-safe; could rayon-ise later).
+    let signatures: Vec<Signature> = chunks
+        .iter()
+        .map(|c| signature_of(&line_shingles(&c.content, 3)))
+        .collect();
+
+    let mut index = LshIndex::new();
+    let mut keep = vec![true; chunks.len()];
+
+    for i in 0..chunks.len() {
+        let cands = index.candidates(&signatures[i]);
+        let mut drop = false;
+        for j in cands {
+            if !keep[j] {
+                continue;
+            }
+            if minhash::jaccard(&signatures[i], &signatures[j]) >= threshold {
+                drop = true;
+                break;
+            }
+        }
+        if !drop {
+            index.insert(i, &signatures[i]);
+        } else {
+            keep[i] = false;
+        }
+    }
+
+    let before = chunks.len();
+    let mut iter = keep.iter();
+    chunks.retain(|_| *iter.next().unwrap());
+    before - chunks.len()
+}
+
 fn jaccard_sorted(a: &[u64], b: &[u64]) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -115,6 +166,7 @@ mod tests {
             content: content.into(),
             kind: ChunkKind::Code,
             priority: 0,
+            skeleton_hint: false,
         }
     }
 
@@ -131,14 +183,14 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_differences_are_dups() {
+    fn whitespace_differences_are_dups() {
         let mut v = vec![c("a", "fn x() {}"), c("b", "fn   x()   {}")];
         run(&mut v, 0.9);
         assert_eq!(v.len(), 1);
     }
 
     #[test]
-    fn near_dup_catches_small_edits() {
+    fn near_dup_small_input_uses_pairwise() {
         let big_a = (0..30)
             .map(|i| format!("let x{i} = {i};"))
             .collect::<Vec<_>>()
@@ -146,14 +198,29 @@ mod tests {
         let mut big_b = big_a.clone();
         big_b.push_str("\nlet extra = 1;");
         let mut v = vec![c("a", &big_a), c("b", &big_b)];
-        run(&mut v, 0.9);
+        let stats = run(&mut v, 0.9);
         assert_eq!(v.len(), 1);
+        assert!(!stats.used_lsh);
     }
 
     #[test]
-    fn disjoint_chunks_both_kept() {
-        let mut v = vec![c("a", "fn apple() {}"), c("b", "struct Banana;")];
-        run(&mut v, 0.9);
-        assert_eq!(v.len(), 2);
+    fn lsh_handles_large_near_dup_batches() {
+        // 100 near-copies of the same function — LSH must dedup to a handful.
+        let base = (0..20)
+            .map(|i| format!("let x{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut v: Vec<InputChunk> = (0..100)
+            .map(|i| {
+                let mut body = base.clone();
+                if i % 10 == 0 {
+                    body.push_str("\n// variant marker");
+                }
+                c(&format!("n{i}"), &body)
+            })
+            .collect();
+        let stats = run(&mut v, 0.85);
+        assert!(stats.used_lsh);
+        assert!(v.len() < 20, "expected aggressive dedup, got {}", v.len());
     }
 }

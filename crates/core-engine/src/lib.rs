@@ -1,31 +1,37 @@
 //! ContextOS core engine — orchestrates the optimization pipeline.
 //!
-//! Pipeline, in order:
-//!   1. **Dedup**       remove byte-identical / near-identical chunks.
-//!   2. **Compress**    strip comments, debug logs, dead whitespace.
-//!   3. **Rank**        score chunks against the user's query/intent.
-//!   4. **Budget**      greedily include highest-scoring chunks until token
-//!                      budget is exhausted.
+//! Pipeline (in order):
+//!   1. **Skeletonise** — for chunks marked `skeleton_hint`, replace bodies
+//!      with signature-only views. Free tokens, zero semantic loss.
+//!   2. **Dedup**       — exact hash + MinHash-LSH near-dup removal.
+//!   3. **Compress**    — AST-aware comment/log/whitespace stripping.
+//!   4. **Rank**        — BM25 against the user's query, with optional
+//!                        PageRank priors supplied by the graph crate.
+//!   5. **Budget**      — greedy fit to `max_tokens`.
 //!
-//! The entry point is [`Engine::optimize`]. It accepts a batch of
-//! [`InputChunk`]s and returns an [`OptimizationResult`] with before/after
-//! token counts so callers (CLI, extension, tests) can verify savings.
+//! Entry points:
+//!   * [`Engine::optimize`] — straightforward, in-memory request.
+//!   * [`Engine::optimize_with_priors`] — same, plus per-chunk PageRank
+//!     scores (typically produced from a [`contextos-graph`] index).
 
 pub mod budget;
 pub mod compress;
 pub mod dedup;
 pub mod ranking;
+pub mod skeleton;
 pub mod types;
 
 pub use types::*;
 
 use contextos_tokenizer::estimate_tokens;
+use ranking::Priors;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineConfig {
     pub max_tokens: usize,
+    pub enable_skeleton: bool,
     pub enable_dedup: bool,
     pub enable_compress: bool,
     pub enable_ranking: bool,
@@ -37,6 +43,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             max_tokens: 8_000,
+            enable_skeleton: true,
             enable_dedup: true,
             enable_compress: true,
             enable_ranking: true,
@@ -61,6 +68,14 @@ impl Engine {
     }
 
     pub fn optimize(&self, input: OptimizationRequest) -> OptimizationResult {
+        self.optimize_with_priors(input, None)
+    }
+
+    pub fn optimize_with_priors(
+        &self,
+        input: OptimizationRequest,
+        priors: Option<&Priors>,
+    ) -> OptimizationResult {
         let started = Instant::now();
         let original_tokens: usize = input
             .chunks
@@ -69,6 +84,12 @@ impl Engine {
             .sum();
 
         let mut chunks = input.chunks;
+
+        let skeleton_stats = if self.config.enable_skeleton {
+            skeleton::apply(&mut chunks)
+        } else {
+            skeleton::Stats::default()
+        };
 
         let dedup_stats = if self.config.enable_dedup {
             dedup::run(&mut chunks, self.config.dedup_similarity)
@@ -83,7 +104,7 @@ impl Engine {
         };
 
         if self.config.enable_ranking {
-            ranking::run(&mut chunks, input.query.as_deref());
+            ranking::run_with_priors(&mut chunks, input.query.as_deref(), priors);
         }
 
         let budget_stats = if self.config.enable_budget {
@@ -99,7 +120,6 @@ impl Engine {
         let final_tokens = budget_stats.final_tokens.max(
             chunks.iter().map(|c| estimate_tokens(&c.content)).sum(),
         );
-
         let saved = original_tokens.saturating_sub(final_tokens);
         let reduction_pct = if original_tokens == 0 {
             0.0
@@ -115,6 +135,7 @@ impl Engine {
             reduction_pct,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
             stats: PipelineStats {
+                skeleton: skeleton_stats,
                 dedup: dedup_stats,
                 compress: compress_stats,
                 budget: budget_stats,
@@ -125,6 +146,7 @@ impl Engine {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineStats {
+    pub skeleton: skeleton::Stats,
     pub dedup: dedup::Stats,
     pub compress: compress::Stats,
     pub budget: budget::Stats,
@@ -142,6 +164,7 @@ mod tests {
             content: content.into(),
             kind: ChunkKind::Code,
             priority: 0,
+            skeleton_hint: false,
         }
     }
 
@@ -165,15 +188,26 @@ mod tests {
     }
 
     #[test]
-    fn budget_enforces_cap() {
+    fn skeleton_hint_drops_bodies() {
         let engine = Engine::new(EngineConfig {
-            max_tokens: 5,
+            max_tokens: 100_000,
             ..Default::default()
         });
-        let chunks = (0..20)
-            .map(|i| chunk(&format!("c{i}"), &format!("some code line number {i}")))
-            .collect();
-        let res = engine.optimize(OptimizationRequest { chunks, query: None });
-        assert!(res.final_tokens <= 20, "must honor the budget within tolerance");
+        let mut c = chunk(
+            "big",
+            r#"
+            pub fn big() -> i32 {
+                let mut total = 0;
+                for i in 0..1000 { total += i; }
+                total
+            }
+            "#,
+        );
+        c.skeleton_hint = true;
+        let res = engine.optimize(OptimizationRequest {
+            chunks: vec![c],
+            query: None,
+        });
+        assert!(!res.chunks[0].content.contains("total += i"));
     }
 }

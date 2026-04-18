@@ -72,6 +72,7 @@ mod tests {
             content: src.into(),
             kind: ChunkKind::Code,
             priority: 0,
+            skeleton_hint: false,
         }];
         let stats = run(&mut v);
         assert!(stats.bytes_after < stats.bytes_before);

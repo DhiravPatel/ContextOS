@@ -74,6 +74,7 @@ mod tests {
             content: content.into(),
             kind: ChunkKind::Code,
             priority: 0,
+            skeleton_hint: false,
         }
     }
 

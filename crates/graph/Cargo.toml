@@ -1,5 +1,5 @@
 [package]
-name = "contextos-core-engine"
+name = "contextos-graph"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,14 +9,17 @@ path = "src/lib.rs"
 
 [dependencies]
 contextos-utils = { path = "../utils" }
-contextos-tokenizer = { path = "../tokenizer" }
-contextos-parser = { path = "../parser" }
 serde.workspace = true
 serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
 ahash.workspace = true
 rayon.workspace = true
 once_cell.workspace = true
-thiserror.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
+ignore.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-typescript.workspace = true

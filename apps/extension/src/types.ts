@@ -19,6 +19,9 @@ export interface InputChunk {
   content: string;
   kind: ChunkKind;
   priority: number;
+  // Opt-in: engine replaces body with a signature-only skeleton before
+  // dedup/rank/budget. Use for files from the far edge of a blast radius.
+  skeleton_hint?: boolean;
 }
 
 export interface OptimizationRequest {
@@ -27,7 +30,17 @@ export interface OptimizationRequest {
 }
 
 export interface PipelineStats {
-  dedup: { exact_removed: number; near_removed: number; kept: number };
+  skeleton: {
+    chunks_skeletonised: number;
+    tokens_before: number;
+    tokens_after: number;
+  };
+  dedup: {
+    exact_removed: number;
+    near_removed: number;
+    kept: number;
+    used_lsh: boolean;
+  };
   compress: {
     tokens_before: number;
     tokens_after: number;
