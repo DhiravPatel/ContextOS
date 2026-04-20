@@ -1,0 +1,27 @@
+[package]
+name = "contextos-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+contextos-utils = { path = "../utils" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+ahash.workspace = true
+rayon.workspace = true
+once_cell.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
+ignore.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
