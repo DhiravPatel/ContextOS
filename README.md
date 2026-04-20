@@ -107,7 +107,9 @@ ContextOS/
 └── docs/
     ├── ARCHITECTURE.md
     ├── USAGE.md
-    └── ALGORITHMS.md                # math details for each technique
+    ├── ALGORITHMS.md                # math details for each technique
+    ├── DEPLOYMENT.md                # full release flow + end-user install + E2E flow
+    └── PUBLISHING.md                # step-by-step VS Code Marketplace + Open VSX publish
 ```
 
 ---

@@ -11,6 +11,7 @@
 //!   stats        — graph stats from the current repo
 //!   version      — print CLI version
 
+mod install;
 mod mcp;
 mod watch;
 
@@ -84,6 +85,16 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
+    /// Auto-configure Claude Code (writes .mcp.json + .claude/settings.local.json).
+    Install {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// Remove the ContextOS entries from .mcp.json + settings.
+    Uninstall {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
     /// Graph stats (node/edge/file counts).
     Stats {
         #[arg(long, default_value = ".")]
@@ -112,6 +123,8 @@ fn main() -> Result<()> {
         Cmd::Skeleton { root, path } => run_skeleton(&root, &path),
         Cmd::Watch { root } => watch::run(&root),
         Cmd::Serve { root } => mcp::serve(&root),
+        Cmd::Install { root } => run_install(&root),
+        Cmd::Uninstall { root } => run_uninstall(&root),
         Cmd::Stats { root } => run_stats(&root),
     }
 }
@@ -211,6 +224,23 @@ fn run_skeleton(root: &Path, path: &str) -> Result<()> {
         std::process::exit(2);
     }
     print!("{sk}");
+    Ok(())
+}
+
+fn run_install(root: &Path) -> Result<()> {
+    let report = install::install(root)?;
+    println!(
+        "install: mcp_json={} settings={} already_configured={}",
+        report.mcp_json_path.display(),
+        report.settings_path.display(),
+        report.already_configured
+    );
+    Ok(())
+}
+
+fn run_uninstall(root: &Path) -> Result<()> {
+    install::uninstall(root)?;
+    println!("uninstall: removed ContextOS entries from .mcp.json + .claude/settings.local.json");
     Ok(())
 }
 

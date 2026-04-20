@@ -3,8 +3,18 @@
   "displayName": "ContextOS",
   "description": "Local-first token reduction for AI coding assistants. Cut context tokens ≥50% without changing output quality.",
   "version": "0.1.0",
-  "publisher": "contextos",
+  "publisher": "DhiravPatel",
   "private": true,
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dhiravpatel/ContextOS"
+  },
+  "bugs": {
+    "url": "https://github.com/dhiravpatel/ContextOS/issues"
+  },
+  "homepage": "https://github.com/dhiravpatel/ContextOS#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -40,6 +50,16 @@
       {
         "command": "contextos.showStats",
         "title": "ContextOS: Show Session Stats",
+        "category": "ContextOS"
+      },
+      {
+        "command": "contextos.reconfigure",
+        "title": "ContextOS: Reconfigure Claude Code for this Project",
+        "category": "ContextOS"
+      },
+      {
+        "command": "contextos.disableForProject",
+        "title": "ContextOS: Remove from this Project",
         "category": "ContextOS"
       }
     ],
