@@ -1,16 +1,19 @@
 {
   "name": "contextos",
   "private": true,
-  "version": "0.1.0",
-  "description": "ContextOS — token-reduction engine for AI code editors",
+  "version": "0.2.0",
+  "description": "ContextOS — local-first token-reduction engine for AI code editors",
   "workspaces": [
-    "apps/extension"
+    "apps/extension",
+    "apps/landing"
   ],
   "scripts": {
     "build:rust": "cargo build --release",
     "build:ext": "npm --workspace apps/extension run compile",
-    "build": "npm run build:rust && npm run build:ext",
-    "watch:ext": "npm --workspace apps/extension run watch",
+    "build:landing": "npm --workspace apps/landing run build",
+    "build": "npm run build:rust && npm run build:ext && npm run build:landing",
+    "dev:ext": "npm --workspace apps/extension run watch",
+    "dev:landing": "npm --workspace apps/landing run dev",
     "package:ext": "npm --workspace apps/extension run package",
     "test:rust": "cargo test --workspace",
     "test:ext": "npm --workspace apps/extension run test",
