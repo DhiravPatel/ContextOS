@@ -4,7 +4,9 @@
 //! BM25 accounts for document length and term saturation, which matters a
 //! lot for source code where some files are 50 lines and others 2000.
 //!
-//!     score(D, Q) = Σ IDF(q) · ((tf · (k1+1)) / (tf + k1·(1 - b + b·|D|/avgdl)))
+//! ```text
+//! score(D, Q) = Σ IDF(q) · ((tf · (k1+1)) / (tf + k1·(1 - b + b·|D|/avgdl)))
+//! ```
 //!
 //! with `k1 = 1.5`, `b = 0.75` (standard defaults).
 

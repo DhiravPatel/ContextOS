@@ -151,13 +151,23 @@ mod tests {
 
     #[test]
     fn lsh_finds_similar_docs() {
-        let base = "line one\nline two\nline three\nline four\nline five\nline six";
-        let near = "line one\nline two\nline three\nline four\nline five\nline seven";
-        let far = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta";
+        // 20-line docs with a single changed line → Jaccard ≈ 0.89, well
+        // above the 0.85 threshold our LSH parameters are tuned for. With
+        // 6-line docs the Jaccard was only ~0.6, which is below threshold
+        // and produces flaky collisions.
+        let base_lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
+        let base = base_lines.join("\n");
+        let mut near_lines = base_lines.clone();
+        near_lines[19] = "LINE NINETEEN CHANGED".into();
+        let near = near_lines.join("\n");
+        let far: String = (0..20)
+            .map(|i| format!("alpha{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        let sa = signature_of(&line_shingles(base, 3));
-        let sb = signature_of(&line_shingles(near, 3));
-        let sc = signature_of(&line_shingles(far, 3));
+        let sa = signature_of(&line_shingles(&base, 3));
+        let sb = signature_of(&line_shingles(&near, 3));
+        let sc = signature_of(&line_shingles(&far, 3));
 
         let mut idx = LshIndex::new();
         idx.insert(0, &sa);

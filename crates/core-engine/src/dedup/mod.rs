@@ -205,22 +205,21 @@ mod tests {
 
     #[test]
     fn lsh_handles_large_near_dup_batches() {
-        // 100 near-copies of the same function — LSH must dedup to a handful.
-        let base = (0..20)
-            .map(|i| format!("let x{i} = {i};"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // 100 near-copies of the same function. Each carries a unique marker
+        // line so exact-hash dedup doesn't collapse them (which would skip
+        // the LSH path entirely). Jaccard between any pair is ~0.92 — well
+        // above the 0.85 threshold — so LSH should collapse all 100 down to
+        // a small handful.
+        let base_lines: Vec<String> = (0..25).map(|i| format!("let x{i} = {i};")).collect();
         let mut v: Vec<InputChunk> = (0..100)
             .map(|i| {
-                let mut body = base.clone();
-                if i % 10 == 0 {
-                    body.push_str("\n// variant marker");
-                }
-                c(&format!("n{i}"), &body)
+                let mut lines = base_lines.clone();
+                lines.push(format!("// unique marker {i}"));
+                c(&format!("n{i}"), &lines.join("\n"))
             })
             .collect();
         let stats = run(&mut v, 0.85);
-        assert!(stats.used_lsh);
+        assert!(stats.used_lsh, "should switch to LSH path with > 64 chunks");
         assert!(v.len() < 20, "expected aggressive dedup, got {}", v.len());
     }
 }
