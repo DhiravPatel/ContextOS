@@ -18,10 +18,10 @@ export const SITE = {
 } as const;
 
 export const NAV_LINKS = [
-  { label: "How it works", href: "#how" },
-  { label: "Features", href: "#features" },
-  { label: "Install", href: "#install" },
-  { label: "Docs", href: "https://github.com/DhiravPatel/ContextOS/blob/main/README.md" },
+  { label: "How it works", href: "/#how" },
+  { label: "Features", href: "/#features" },
+  { label: "Install", href: "/#install" },
+  { label: "Docs", href: "/docs" },
 ] as const;
 
 export const PIPELINE_STAGES = [
@@ -105,3 +105,57 @@ export const HERO_METRICS = {
 export const LEGAL = {
   copyright: `© ${new Date().getFullYear()} ContextOS. MIT-licensed.`,
 } as const;
+
+/**
+ * In-site documentation. Each group has an ordered list of pages; the order
+ * drives both the sidebar and the next/previous footer links on each page.
+ */
+export const DOCS_NAV: ReadonlyArray<{
+  group: string;
+  items: ReadonlyArray<{ href: string; title: string; description?: string }>;
+}> = [
+  {
+    group: "Start here",
+    items: [
+      { href: "/docs", title: "Overview" },
+      {
+        href: "/docs/getting-started",
+        title: "Getting started",
+        description: "Install the extension in two minutes.",
+      },
+    ],
+  },
+  {
+    group: "Deep dive",
+    items: [
+      {
+        href: "/docs/how-it-works",
+        title: "How it works",
+        description: "The 5-stage optimization pipeline.",
+      },
+      {
+        href: "/docs/algorithms",
+        title: "Algorithms",
+        description: "BM25, MinHash-LSH, PageRank — with math.",
+      },
+      {
+        href: "/docs/mcp",
+        title: "MCP server",
+        description: "The 6 tools Claude Code calls.",
+      },
+    ],
+  },
+  {
+    group: "Operations",
+    items: [
+      {
+        href: "/docs/publishing",
+        title: "Publishing",
+        description: "Ship new versions to the Marketplace.",
+      },
+    ],
+  },
+];
+
+/** Flat list used for next/prev pagination. */
+export const DOCS_PAGES = DOCS_NAV.flatMap((g) => g.items);

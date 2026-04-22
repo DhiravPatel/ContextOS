@@ -48,14 +48,12 @@ export function Pipeline() {
 
         <p className="mx-auto mt-10 max-w-2xl text-center text-sm text-fg-subtle">
           Full algorithmic justification (BM25 formulas, MinHash collision math,
-          PageRank convergence proofs) lives in{" "}
+          PageRank convergence proofs) is in the{" "}
           <a
-            href="https://github.com/DhiravPatel/ContextOS/blob/main/docs/ALGORITHMS.md"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="/docs/algorithms"
             className="text-accent transition-colors hover:text-accent-cyan"
           >
-            docs/ALGORITHMS.md
+            Algorithms reference
           </a>
           .
         </p>

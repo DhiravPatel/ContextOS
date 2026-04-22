@@ -35,25 +35,19 @@ export function Footer() {
           <FooterColumn
             title="Product"
             links={[
-              { label: "How it works", href: "#how" },
-              { label: "Features", href: "#features" },
-              { label: "Install", href: "#install" },
+              { label: "How it works", href: "/#how" },
+              { label: "Features", href: "/#features" },
+              { label: "Install", href: "/#install" },
             ]}
           />
 
           <FooterColumn
-            title="Resources"
+            title="Docs"
             links={[
-              {
-                label: "Documentation",
-                href: `${SITE.github}/blob/main/README.md`,
-                external: true,
-              },
-              {
-                label: "Algorithms",
-                href: `${SITE.github}/blob/main/docs/ALGORITHMS.md`,
-                external: true,
-              },
+              { label: "Getting started", href: "/docs/getting-started" },
+              { label: "How it works", href: "/docs/how-it-works" },
+              { label: "Algorithms", href: "/docs/algorithms" },
+              { label: "MCP server", href: "/docs/mcp" },
               { label: "GitHub", href: SITE.github, external: true },
             ]}
           />
