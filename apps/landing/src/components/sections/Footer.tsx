@@ -48,7 +48,6 @@ export function Footer() {
               { label: "How it works", href: "/docs/how-it-works" },
               { label: "Algorithms", href: "/docs/algorithms" },
               { label: "MCP server", href: "/docs/mcp" },
-              { label: "GitHub", href: SITE.github, external: true },
             ]}
           />
         </div>

@@ -36,10 +36,12 @@ export function DocsSidebar({
                     onClick={onNavigate}
                     aria-current={active ? "page" : undefined}
                     className={cn(
-                      "block rounded-lg px-3 py-1.5 text-sm transition-colors",
+                      "group relative block rounded-md px-3 py-1.5 text-sm transition-colors",
+                      // Left accent bar — only visible on the active item.
+                      "before:absolute before:left-0 before:top-1/2 before:h-4 before:-translate-y-1/2 before:rounded-full before:bg-accent before:transition-all",
                       active
-                        ? "bg-accent/10 text-accent"
-                        : "text-fg-muted hover:bg-bg-muted hover:text-fg",
+                        ? "font-medium text-accent before:w-[3px]"
+                        : "text-fg-muted before:w-0 hover:text-fg",
                     )}
                   >
                     {item.title}

@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { Menu, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { LinkButton } from "@/components/ui/Button";
 import { NAV_LINKS, SITE } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 
@@ -35,10 +34,10 @@ export function Navbar() {
           : "bg-transparent",
       )}
     >
-      <nav className="container-tight flex h-16 items-center justify-between">
+      <nav className="container-tight grid h-16 grid-cols-[1fr_auto_1fr] items-center">
         <Link
           href="/"
-          className="group flex items-center gap-2 text-sm font-semibold tracking-tight"
+          className="group flex w-fit items-center gap-2 text-sm font-semibold tracking-tight"
           aria-label={SITE.name}
         >
           <span
@@ -52,8 +51,8 @@ export function Navbar() {
           <span className="text-fg">ContextOS</span>
         </Link>
 
-        {/* Desktop nav */}
-        <ul className="hidden items-center gap-8 md:flex">
+        {/* Desktop nav — centered */}
+        <ul className="hidden items-center justify-center gap-8 md:flex">
           {NAV_LINKS.map((link) => (
             <li key={link.href}>
               <Link
@@ -66,36 +65,20 @@ export function Navbar() {
           ))}
         </ul>
 
-        <div className="hidden items-center gap-3 md:flex">
-          <LinkButton
-            variant="ghost"
-            size="sm"
-            href={SITE.github}
-            external
-            aria-label="GitHub repository"
+        {/* Mobile menu toggle (right column on mobile; placeholder keeps
+             the grid balanced so the centred nav stays visually centred on
+             desktop). */}
+        <div className="flex justify-end">
+          <button
+            type="button"
+            aria-label={open ? "Close menu" : "Open menu"}
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-line text-fg md:hidden"
           >
-            GitHub
-          </LinkButton>
-          <LinkButton
-            variant="primary"
-            size="sm"
-            href={SITE.marketplace}
-            external
-          >
-            Install
-          </LinkButton>
+            {open ? <X size={16} /> : <Menu size={16} />}
+          </button>
         </div>
-
-        {/* Mobile menu toggle */}
-        <button
-          type="button"
-          aria-label={open ? "Close menu" : "Open menu"}
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
-          className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-line text-fg md:hidden"
-        >
-          {open ? <X size={16} /> : <Menu size={16} />}
-        </button>
       </nav>
 
       {/* Mobile panel */}
@@ -113,26 +96,6 @@ export function Navbar() {
                 </Link>
               </li>
             ))}
-            <li className="mt-2 flex gap-2 px-3">
-              <LinkButton
-                variant="secondary"
-                size="sm"
-                href={SITE.github}
-                external
-                className="flex-1"
-              >
-                GitHub
-              </LinkButton>
-              <LinkButton
-                variant="primary"
-                size="sm"
-                href={SITE.marketplace}
-                external
-                className="flex-1"
-              >
-                Install
-              </LinkButton>
-            </li>
           </ul>
         </div>
       )}
