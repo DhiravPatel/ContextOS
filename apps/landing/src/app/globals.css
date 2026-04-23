@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-bg text-fg;
+    background-image: radial-gradient(
+        circle at 18% -10%,
+        rgba(52, 211, 153, 0.14),
+        transparent 45%
+      ),
+      radial-gradient(
+        circle at 85% 5%,
+        rgba(34, 211, 238, 0.08),
+        transparent 45%
+      );
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    background: rgba(52, 211, 153, 0.35);
+    color: white;
+  }
+}
+
+@layer components {
+  .container-tight {
+    @apply mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-8;
+  }
+
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(ellipse at center, black 40%, transparent 80%);
+  }
+
+  .soft-border {
+    @apply rounded-2xl border border-line bg-bg-elevated/70 backdrop-blur-sm;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, #34d399 0%, #22d3ee 100%);
+  }
+}
