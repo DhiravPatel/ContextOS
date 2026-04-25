@@ -1,15 +1,20 @@
 //! Deduplication pass.
 //!
-//! Three levels, cascading:
+//! Four levels, cascading:
 //!   1. **Exact chunk dedup** — drop chunks whose whitespace-normalized
 //!      content hash has already been seen. O(n).
-//!   2. **MinHash + LSH** (for n ≥ `LSH_THRESHOLD`) — bucket by banded
+//!   2. **SimHash pre-filter** — 64-bit token-bag fingerprint per chunk.
+//!      Pairs whose Hamming distance is ≤ `DEFAULT_HAMMING_THRESHOLD` are
+//!      flagged as duplicates *before* the more expensive Jaccard/MinHash
+//!      pass runs. Catches reorderings that line-Jaccard misses.
+//!   3. **MinHash + LSH** (for n ≥ `LSH_THRESHOLD`) — bucket by banded
 //!      MinHash signatures and compare only within-bucket pairs. Turns a
 //!      pathological O(n²) into O(n) on repo-scale inputs.
-//!   3. **Line-set Jaccard** (small n) — direct Jaccard over line
+//!   4. **Line-set Jaccard** (small n) — direct Jaccard over line
 //!      fingerprints. Kept for tiny inputs where LSH has startup overhead.
 
 pub mod minhash;
+pub mod simhash;
 
 use crate::types::InputChunk;
 use ahash::AHashMap;
@@ -23,6 +28,7 @@ const LSH_THRESHOLD: usize = 64;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stats {
     pub exact_removed: usize,
+    pub simhash_removed: usize,
     pub near_removed: usize,
     pub kept: usize,
     pub used_lsh: bool,
@@ -37,6 +43,8 @@ pub fn run(chunks: &mut Vec<InputChunk>, similarity_threshold: f32) -> Stats {
     });
     let after_exact = chunks.len();
 
+    let simhash_removed = dedup_with_simhash(chunks, simhash::DEFAULT_HAMMING_THRESHOLD);
+
     let (near_removed, used_lsh) = if chunks.len() >= LSH_THRESHOLD {
         let removed = dedup_with_lsh(chunks, similarity_threshold as f64);
         (removed, true)
@@ -47,10 +55,47 @@ pub fn run(chunks: &mut Vec<InputChunk>, similarity_threshold: f32) -> Stats {
 
     Stats {
         exact_removed: before - after_exact,
+        simhash_removed,
         near_removed,
         kept: chunks.len(),
         used_lsh,
     }
+}
+
+/// Drop chunks whose 64-bit SimHash fingerprint is within `hamming_threshold`
+/// bits of an already-kept chunk. O(n²) on the *kept* set, but each
+/// comparison is one popcnt — millions per second — so this is far cheaper
+/// than running MinHash on the full set.
+fn dedup_with_simhash(chunks: &mut Vec<InputChunk>, hamming_threshold: u32) -> usize {
+    if chunks.len() < 2 {
+        return 0;
+    }
+    let fingerprints: Vec<u64> = chunks.iter().map(|c| simhash::simhash(&c.content)).collect();
+    let mut keep = vec![true; chunks.len()];
+    let mut kept_fps: Vec<u64> = Vec::with_capacity(chunks.len());
+
+    for i in 0..chunks.len() {
+        // SimHash of empty / token-less chunks is 0 — never collapse those
+        // against each other; defer to the line-set / MinHash pass instead.
+        let fp = fingerprints[i];
+        if fp == 0 {
+            kept_fps.push(fp);
+            continue;
+        }
+        let collide = kept_fps
+            .iter()
+            .any(|&prev| prev != 0 && simhash::hamming(prev, fp) <= hamming_threshold);
+        if collide {
+            keep[i] = false;
+        } else {
+            kept_fps.push(fp);
+        }
+    }
+
+    let before = chunks.len();
+    let mut iter = keep.iter();
+    chunks.retain(|_| *iter.next().unwrap());
+    before - chunks.len()
 }
 
 fn dedup_pairwise(chunks: &mut Vec<InputChunk>, threshold: f64) -> usize {
@@ -206,10 +251,11 @@ mod tests {
     #[test]
     fn lsh_handles_large_near_dup_batches() {
         // 100 near-copies of the same function. Each carries a unique marker
-        // line so exact-hash dedup doesn't collapse them (which would skip
-        // the LSH path entirely). Jaccard between any pair is ~0.92 — well
-        // above the 0.85 threshold — so LSH should collapse all 100 down to
-        // a small handful.
+        // line so exact-hash dedup doesn't collapse them. With SimHash now
+        // running ahead of LSH, near-identical token bags get collapsed at
+        // the SimHash level — that's the whole point of the pre-filter. We
+        // still assert the workload is *aggressively* deduped; whether
+        // SimHash or LSH did the cutting depends on input distribution.
         let base_lines: Vec<String> = (0..25).map(|i| format!("let x{i} = {i};")).collect();
         let mut v: Vec<InputChunk> = (0..100)
             .map(|i| {
@@ -219,7 +265,38 @@ mod tests {
             })
             .collect();
         let stats = run(&mut v, 0.85);
-        assert!(stats.used_lsh, "should switch to LSH path with > 64 chunks");
+        assert!(
+            stats.simhash_removed + stats.near_removed > 80,
+            "expected aggressive near-dup removal, got simhash={} near={}",
+            stats.simhash_removed,
+            stats.near_removed
+        );
         assert!(v.len() < 20, "expected aggressive dedup, got {}", v.len());
+    }
+
+    #[test]
+    fn simhash_collapses_reordered_duplicates() {
+        // Two chunks with the same token bag in different order — Jaccard
+        // would catch this (line-shingles overlap), but SimHash is the
+        // canonical fix. We give them enough unique tokens to clear the
+        // MIN_UNIQUE_TOKENS floor.
+        let a = "fn process_payment(intent_id: String, amount: u64) -> Result<Receipt> { todo!() }";
+        let b = "fn process_payment(amount: u64, intent_id: String) -> Result<Receipt> { todo!() }";
+        let mut v = vec![c("a", a), c("b", b)];
+        let stats = run(&mut v, 0.99);
+        assert!(
+            stats.simhash_removed >= 1 || stats.near_removed >= 1,
+            "expected reorder duplicate to be removed, got {stats:?}"
+        );
+        assert_eq!(v.len(), 1);
+    }
+
+    #[test]
+    fn simhash_does_not_collapse_tiny_distinct_chunks() {
+        // Below the MIN_UNIQUE_TOKENS floor SimHash should defer.
+        let mut v = vec![c("a", "fn x() {}"), c("b", "fn y() {}")];
+        let stats = run(&mut v, 0.99);
+        assert_eq!(v.len(), 2, "tiny distinct chunks must survive, got {stats:?}");
+        assert_eq!(stats.simhash_removed, 0);
     }
 }

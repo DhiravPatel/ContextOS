@@ -108,6 +108,23 @@ impl<'a> GraphQuery<'a> {
         Ok(scored)
     }
 
+    /// Personalized PageRank: same shape as [`top_central`], but with the
+    /// teleport distribution concentrated on `seeds`. Use this when there's
+    /// a query or a changed-files set that should bias centrality —
+    /// "important *to this request*" rather than "important to the repo".
+    pub fn top_central_personalized(
+        &self,
+        seeds: &[i64],
+        pool: &[i64],
+        top_k: usize,
+    ) -> Result<Vec<(i64, f64)>> {
+        let pr = pagerank::run_personalized(self.store, seeds)?;
+        let mut scored: Vec<(i64, f64)> = pool.iter().map(|&id| (id, pr.get(id))).collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        Ok(scored)
+    }
+
     /// Lookup by textual symbol name (returns up to `limit` candidates).
     pub fn find(&self, name: &str, limit: usize) -> Result<Vec<Node>> {
         self.store.find_node_by_name(name, limit)

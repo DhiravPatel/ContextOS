@@ -65,14 +65,21 @@ Every algorithm below preserves output semantics — nothing is rephrased, summa
 | Technique | Purpose | Complexity |
 |---|---|---|
 | **SHA-256 file hashing** | Incremental graph updates (skip unchanged files) | O(file bytes) |
+| **Rabin content-defined chunking** (48-byte window, 8 KiB expected size) | Edit-stable chunk boundaries → higher dedup hit rate across edits | O(N) bytes |
 | **Tree-sitter AST walk** | Syntax-aware comment/log stripping (no string-literal collisions) | O(source bytes) |
 | **Jaccard over line fingerprints** | Near-dup detection for small chunk sets | O(n²) — small n only |
+| **SimHash** (64-bit, Hamming ≤ 3) | Token-bag near-dup pre-filter; catches reorderings line-Jaccard misses | O(n²) popcnt — fast in practice |
 | **MinHash + LSH** (128 permutations, 16 bands × 8 rows) | Scalable near-dup detection for repo-scale inputs | O(n · perm) construction, O(n) candidate lookup |
 | **Okapi BM25** (k1=1.5, b=0.75) | Length-normalised query-to-chunk relevance | O(chunks · query terms) |
-| **TF-IDF density** | Fallback ranker when no user query | O(total tokens) |
-| **PageRank** (damping=0.85, power iteration, tol=1e-6) | Centrality prior: structurally important symbols win ties | O(iters · edges), ~10ms for 10k nodes |
+| **TF-IDF density** | Query-free distinctiveness signal | O(total tokens) |
+| **Reciprocal Rank Fusion** (k=60) | Combines BM25 + density + graph priors on **rank**, not score; no weight tuning | O(n · rankers) |
+| **PageRank** (damping=0.85, power iteration, tol=1e-6) | Repo-wide centrality prior | O(iters · edges), ~10ms for 10k nodes |
+| **Personalized PageRank** (seed-biased teleport vector) | Query-conditioned centrality — "important *to this request*" | O(iters · edges) |
 | **BFS blast radius** | Reverse-edge traversal over `calls ∪ imports ∪ inherits` | O(impacted nodes + edges) |
-| **Greedy knapsack** (with 5% slack) | Pack highest-ranked chunks into `max_tokens` | O(n) post-ranking |
+| **MMR + Submodular coverage** (λ=0.7) | Diversity-aware budget selection with (1−1/e) approximation guarantee | O(n²·k) — k = chunks selected |
+| **0/1 Knapsack DP** (n ≤ 256) | Exact-optimum budget packing for small inputs | O(n · max_tokens) |
+| **Greedy knapsack** (with 5% slack) | Fast fallback for tiny inputs | O(n) post-ranking |
+| **Prompt-cache-aware ordering** (deterministic stable hash) | Byte-identical prompts across repeated calls → LLM provider cache hits | O(n log n) |
 
 Typical combined reduction on a real TypeScript service: **73%** on redundant-file workloads, **88%** when the graph picks only the blast radius and the pipeline compresses what's left.
 

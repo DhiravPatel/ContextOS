@@ -3,11 +3,16 @@
 //! Pipeline (in order):
 //!   1. **Skeletonise** — for chunks marked `skeleton_hint`, replace bodies
 //!      with signature-only views. Free tokens, zero semantic loss.
-//!   2. **Dedup**       — exact hash + MinHash-LSH near-dup removal.
+//!   2. **Dedup**       — exact hash + SimHash + MinHash-LSH near-dup removal.
 //!   3. **Compress**    — AST-aware comment/log/whitespace stripping.
-//!   4. **Rank**        — BM25 against the user's query, with optional
-//!                        PageRank priors supplied by the graph crate.
-//!   5. **Budget**      — greedy fit to `max_tokens`.
+//!   4. **Rank**        — BM25 + density + optional graph priors fused via
+//!                        Reciprocal Rank Fusion.
+//!   5. **Budget**      — diversity-aware MMR + submodular coverage by
+//!                        default; 0/1 knapsack DP or greedy on demand.
+//!   6. **Cache-order** — stable, content-addressable ordering of selected
+//!                        chunks so identical selections across requests
+//!                        produce byte-identical prompts (LLM provider
+//!                        prompt-cache friendly).
 //!
 //! Entry points:
 //!   * [`Engine::optimize`] — straightforward, in-memory request.
@@ -23,6 +28,7 @@ pub mod types;
 
 pub use types::*;
 
+use budget::{Strategy as BudgetStrategy, DEFAULT_MMR_LAMBDA};
 use contextos_tokenizer::estimate_tokens;
 use ranking::Priors;
 use serde::{Deserialize, Serialize};
@@ -37,6 +43,27 @@ pub struct EngineConfig {
     pub enable_ranking: bool,
     pub enable_budget: bool,
     pub dedup_similarity: f32,
+    /// Budget selection strategy. `Auto` picks `MmrSubmodular` for inputs
+    /// with 3+ chunks, otherwise `Greedy`.
+    #[serde(default)]
+    pub budget_strategy: BudgetStrategy,
+    /// MMR diversity/relevance balance (0 = max diversity, 1 = max
+    /// relevance). Only used by `MmrSubmodular`.
+    #[serde(default = "default_mmr_lambda")]
+    pub mmr_lambda: f64,
+    /// When true, the final pipeline step re-orders selected chunks by a
+    /// stable, content-addressable key so repeated requests with the same
+    /// chunk set produce byte-identical prompts. This dramatically improves
+    /// LLM provider prompt-cache hit rate.
+    #[serde(default = "default_true")]
+    pub enable_cache_order: bool,
+}
+
+fn default_mmr_lambda() -> f64 {
+    DEFAULT_MMR_LAMBDA
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Default for EngineConfig {
@@ -49,6 +76,9 @@ impl Default for EngineConfig {
             enable_ranking: true,
             enable_budget: true,
             dedup_similarity: 0.92,
+            budget_strategy: BudgetStrategy::Auto,
+            mmr_lambda: DEFAULT_MMR_LAMBDA,
+            enable_cache_order: true,
         }
     }
 }
@@ -108,14 +138,24 @@ impl Engine {
         }
 
         let budget_stats = if self.config.enable_budget {
-            budget::run(&mut chunks, self.config.max_tokens)
+            budget::run_with(
+                &mut chunks,
+                self.config.max_tokens,
+                self.config.budget_strategy,
+                self.config.mmr_lambda,
+            )
         } else {
             budget::Stats {
                 kept: chunks.len(),
                 dropped: 0,
                 final_tokens: chunks.iter().map(|c| estimate_tokens(&c.content)).sum(),
+                strategy: Some("disabled".into()),
             }
         };
+
+        if self.config.enable_cache_order {
+            budget::cache_aware_order(&mut chunks);
+        }
 
         let final_tokens = budget_stats.final_tokens.max(
             chunks.iter().map(|c| estimate_tokens(&c.content)).sum(),
