@@ -212,6 +212,7 @@ mod tests {
             kind: ChunkKind::Code,
             priority: 0,
             skeleton_hint: false,
+            community: None,
         }
     }
 

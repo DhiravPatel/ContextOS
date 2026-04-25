@@ -73,8 +73,15 @@ Every algorithm below preserves output semantics — nothing is rephrased, summa
 | **Okapi BM25** (k1=1.5, b=0.75) | Length-normalised query-to-chunk relevance | O(chunks · query terms) |
 | **TF-IDF density** | Query-free distinctiveness signal | O(total tokens) |
 | **Reciprocal Rank Fusion** (k=60) | Combines BM25 + density + graph priors on **rank**, not score; no weight tuning | O(n · rankers) |
+| **RM3 pseudo-relevance feedback** (top-5 docs, top-8 expansion terms, α=0.3) | Auto-expand the query with high-IDF terms from top-scoring docs; lifts BM25 recall ~10–20% | O(2 · BM25 cost) |
+| **Count-Min Sketch boilerplate collapse** (ε=0.001, δ=1e-4) | Detect lines repeating ≥4× across chunks; strip every occurrence after the first | O(N) lines |
 | **PageRank** (damping=0.85, power iteration, tol=1e-6) | Repo-wide centrality prior | O(iters · edges), ~10ms for 10k nodes |
 | **Personalized PageRank** (seed-biased teleport vector) | Query-conditioned centrality — "important *to this request*" | O(iters · edges) |
+| **Random Walk with Restart** (α=0.5) | Soft impact radius; probability mass decays smoothly with distance | O(iters · edges) |
+| **Louvain community detection** (Phase-1 local greedy) | Modularity-maximising clustering for budget-balanced selection | O(iters · edges) |
+| **Brandes-Pich approximate betweenness** (50 sampled pivots) | Bridge-node centrality prior; complements PageRank in RRF | O(k · (V + E)), k=pivots |
+| **Steiner tree (KMB 2-approximation)** | Min subgraph connecting must-include terminals; smaller than blast radius | O(k · (V + E)), k=terminals |
+| **Tree-shaking forward reachability** | Drop unreachable code from the candidate set | O(V + E) |
 | **BFS blast radius** | Reverse-edge traversal over `calls ∪ imports ∪ inherits` | O(impacted nodes + edges) |
 | **MMR + Submodular coverage** (λ=0.7) | Diversity-aware budget selection with (1−1/e) approximation guarantee | O(n²·k) — k = chunks selected |
 | **0/1 Knapsack DP** (n ≤ 256) | Exact-optimum budget packing for small inputs | O(n · max_tokens) |
@@ -154,6 +161,11 @@ echo '{"chunks":[{"id":"a","language":"typescript","content":"// hi\nfn add(){}"
 | `contextos watch --root <path>` | Live filesystem watcher, auto-updates the graph |
 | `contextos serve --root <path>` | MCP JSON-RPC server on stdio |
 | `contextos stats --root <path>` | Graph node / edge / file counts |
+| `contextos rwr --top-k N <seed-paths...>` | Random-walk-with-restart top-k from seed files |
+| `contextos communities --root <path>` | Louvain communities (one node per line) |
+| `contextos bridges --top-k N` | Sampled betweenness centrality, descending |
+| `contextos steiner <names...>` | Approximate Steiner subgraph connecting named symbols |
+| `contextos reachable <files...>` | Forward-reachable closure of root files |
 | `contextos optimize [--max-tokens N] [--pretty]` | Run the pipeline; stdin → stdout JSON |
 
 ---

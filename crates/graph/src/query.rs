@@ -3,7 +3,12 @@
 //! Blast radius, skeletons, and centrality-based picking. This is where the
 //! core-engine goes to find "the minimal slice that matters."
 
+use crate::betweenness;
+use crate::community;
 use crate::pagerank;
+use crate::reachable::{self, Direction};
+use crate::rwr;
+use crate::steiner;
 use crate::store::GraphStore;
 use crate::types::{EdgeKind, Node, NodeKind};
 use ahash::{AHashMap, AHashSet};
@@ -128,5 +133,50 @@ impl<'a> GraphQuery<'a> {
     /// Lookup by textual symbol name (returns up to `limit` candidates).
     pub fn find(&self, name: &str, limit: usize) -> Result<Vec<Node>> {
         self.store.find_node_by_name(name, limit)
+    }
+
+    /// Random-walk-with-restart "soft" impact radius. Returns the top-k
+    /// nodes by stationary probability when the surfer keeps restarting
+    /// at one of the seeds. Use when BFS depth feels too binary — RWR
+    /// scores fall off smoothly with distance.
+    pub fn impact_rwr(&self, seeds: &[i64], top_k: usize) -> Result<Vec<(i64, f64)>> {
+        let r = rwr::run(self.store, seeds)?;
+        Ok(r.top_k(top_k))
+    }
+
+    /// Louvain communities — a clustering of the entire graph by
+    /// modularity. Useful for "balance the budget across topics" — each
+    /// community typically corresponds to a coherent module.
+    pub fn communities(&self) -> Result<community::CommunityResult> {
+        community::run(self.store)
+    }
+
+    /// Approximate betweenness centrality (Brandes-Pich, 50 pivots). High
+    /// scores ≈ "bridge" symbols that lie on many shortest paths.
+    pub fn bridge_scores(&self) -> Result<betweenness::BetweennessResult> {
+        betweenness::run(self.store)
+    }
+
+    /// 2-approximate Steiner subgraph connecting `terminals`. Cheaper to
+    /// send to the LLM than `impact_radius` when the caller already
+    /// knows the symbols they care about.
+    pub fn steiner_subgraph(&self, terminals: &[i64]) -> Result<steiner::SteinerResult> {
+        steiner::run(self.store, terminals)
+    }
+
+    /// Forward reachability — the call/import-imports closure of `roots`.
+    /// Anything not returned can be safely tree-shaken from the candidate
+    /// set.
+    pub fn reachable_from(&self, roots: &[i64]) -> Result<reachable::ReachableResult> {
+        reachable::run(self.store, roots, Direction::Forward)
+    }
+
+    /// Reverse reachability — every node that can reach `targets`
+    /// (the "who depends on me?" set, unbounded depth).
+    pub fn reverse_reachable_from(
+        &self,
+        targets: &[i64],
+    ) -> Result<reachable::ReachableResult> {
+        reachable::run(self.store, targets, Direction::Reverse)
     }
 }

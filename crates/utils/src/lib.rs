@@ -3,6 +3,9 @@
 //! Kept intentionally tiny: hashing, language detection, light text helpers.
 //! Anything bigger belongs in a domain crate (parser, core-engine, ...).
 
+pub mod count_min;
+pub use count_min::CountMinSketch;
+
 use ahash::AHasher;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};

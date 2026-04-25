@@ -83,12 +83,54 @@ pub fn run(chunks: &mut Vec<InputChunk>, max_tokens: usize) -> Stats {
     run_with(chunks, max_tokens, Strategy::Auto, DEFAULT_MMR_LAMBDA)
 }
 
+/// Bundled options for the budget pass. Adding fields here is the
+/// preferred extension point — keeps the call signature stable when
+/// new tunables get added.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    pub strategy: Strategy,
+    pub mmr_lambda: f64,
+    /// When true and chunks carry `community` labels, MMR adds a
+    /// per-community coverage bonus so the budget spreads across
+    /// clusters. No-op if no chunk has `community = Some(_)`.
+    pub community_aware: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            strategy: Strategy::Auto,
+            mmr_lambda: DEFAULT_MMR_LAMBDA,
+            community_aware: false,
+        }
+    }
+}
+
 pub fn run_with(
     chunks: &mut Vec<InputChunk>,
     max_tokens: usize,
     strategy: Strategy,
     mmr_lambda: f64,
 ) -> Stats {
+    run_with_options(
+        chunks,
+        max_tokens,
+        Options {
+            strategy,
+            mmr_lambda,
+            community_aware: false,
+        },
+    )
+}
+
+pub fn run_with_options(
+    chunks: &mut Vec<InputChunk>,
+    max_tokens: usize,
+    opts: Options,
+) -> Stats {
+    let strategy = opts.strategy;
+    let mmr_lambda = opts.mmr_lambda;
+    let community_aware = opts.community_aware;
     if max_tokens == 0 {
         let dropped = chunks.len();
         chunks.clear();
@@ -114,7 +156,9 @@ pub fn run_with(
     match resolved {
         Strategy::Greedy => run_greedy(chunks, max_tokens),
         Strategy::KnapsackDp => run_knapsack(chunks, max_tokens),
-        Strategy::MmrSubmodular => run_mmr_submodular(chunks, max_tokens, mmr_lambda),
+        Strategy::MmrSubmodular => {
+            run_mmr_submodular(chunks, max_tokens, mmr_lambda, community_aware)
+        }
         Strategy::Auto => unreachable!("Auto resolved above"),
     }
 }
@@ -237,7 +281,12 @@ fn run_knapsack(chunks: &mut Vec<InputChunk>, max_tokens: usize) -> Stats {
 
 // ---- MMR + submodular coverage ----------------------------------------
 
-fn run_mmr_submodular(chunks: &mut Vec<InputChunk>, max_tokens: usize, lambda: f64) -> Stats {
+fn run_mmr_submodular(
+    chunks: &mut Vec<InputChunk>,
+    max_tokens: usize,
+    lambda: f64,
+    community_aware: bool,
+) -> Stats {
     let n = chunks.len();
     if n == 0 {
         return Stats {
@@ -283,6 +332,27 @@ fn run_mmr_submodular(chunks: &mut Vec<InputChunk>, max_tokens: usize, lambda: f
         all.len().max(1)
     };
 
+    // Community-coverage bookkeeping. We only do work here when the flag
+    // is on AND at least one chunk carries a label — otherwise the
+    // bonus term is identically zero and selection is unchanged.
+    let community: Vec<Option<u32>> = chunks.iter().map(|c| c.community).collect();
+    let community_universe: usize = if community_aware {
+        let mut s: AHashSet<u32> = AHashSet::new();
+        for c in &community {
+            if let Some(v) = c {
+                s.insert(*v);
+            }
+        }
+        s.len()
+    } else {
+        0
+    };
+    let community_active = community_aware && community_universe > 0;
+    // Tunable: how strongly to prefer covering a new community vs. raw
+    // line coverage. 0.4 leaves the dominant signal as relevance / line
+    // coverage but is enough to break ties in favour of cluster diversity.
+    const COMMUNITY_BONUS: f64 = 0.4;
+
     // Maximum relevance — used to normalise relevance into [0, 1].
     let max_rel = relevance.iter().cloned().fold(0.0f64, f64::max).max(1e-12);
 
@@ -290,6 +360,7 @@ fn run_mmr_submodular(chunks: &mut Vec<InputChunk>, max_tokens: usize, lambda: f
 
     let mut chosen = vec![false; n];
     let mut covered: AHashSet<u64> = AHashSet::new();
+    let mut covered_communities: AHashSet<u32> = AHashSet::new();
     let mut running = 0usize;
 
     loop {
@@ -306,8 +377,20 @@ fn run_mmr_submodular(chunks: &mut Vec<InputChunk>, max_tokens: usize, lambda: f
             let rel_norm = relevance[i] / max_rel;
             let new_features = features[i].iter().filter(|x| !covered.contains(x)).count();
             let cov_gain = new_features as f64 / universe_size as f64;
-            // MMR with submodular gain: λ·rel + (1−λ)·new_coverage.
-            let score = lambda * rel_norm + (1.0 - lambda) * cov_gain;
+            let community_gain = if community_active {
+                match community[i] {
+                    Some(c) if !covered_communities.contains(&c) => {
+                        1.0 / community_universe as f64
+                    }
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            };
+            // MMR + submodular: λ·rel + (1−λ)·line_coverage + bonus · community_coverage.
+            let score = lambda * rel_norm
+                + (1.0 - lambda) * cov_gain
+                + COMMUNITY_BONUS * community_gain;
             if best.map(|(_, s)| score > s).unwrap_or(true) {
                 best = Some((i, score));
             }
@@ -320,6 +403,11 @@ fn run_mmr_submodular(chunks: &mut Vec<InputChunk>, max_tokens: usize, lambda: f
                 running += weights[i];
                 for &x in &features[i] {
                     covered.insert(x);
+                }
+                if community_active {
+                    if let Some(c) = community[i] {
+                        covered_communities.insert(c);
+                    }
                 }
                 if running >= max_tokens {
                     break;
@@ -397,7 +485,14 @@ mod tests {
             kind: ChunkKind::Code,
             priority: 0,
             skeleton_hint: false,
+            community: None,
         }
+    }
+
+    fn c_with_community(id: &str, content: &str, community: u32) -> InputChunk {
+        let mut chunk = c(id, content);
+        chunk.community = Some(community);
+        chunk
     }
 
     #[test]
@@ -482,6 +577,69 @@ mod tests {
         let mut v = vec![c("a", "x"), c("b", "y")];
         let stats = run(&mut v, 1_000);
         assert_eq!(stats.strategy.as_deref(), Some("greedy"));
+    }
+
+    #[test]
+    fn community_aware_mmr_spreads_across_clusters() {
+        // Three chunks in cluster 0 (all very rank-relevant), one chunk in
+        // cluster 1 (lower rank). Without community awareness, MMR fills
+        // the budget with cluster-0 chunks. With community awareness on,
+        // the cluster-1 chunk should sneak in even with a lower rank,
+        // because covering a new community is worth more than the third
+        // redundant cluster-0 chunk.
+        let mut v = vec![
+            c_with_community("a0", "alpha unique tokens here one", 0),
+            c_with_community("a1", "alpha second different tokens two", 0),
+            c_with_community("a2", "alpha third yet more distinct three", 0),
+            c_with_community("b0", "beta totally other concept four", 1),
+        ];
+        let stats = run_with_options(
+            &mut v,
+            45,
+            Options {
+                strategy: Strategy::MmrSubmodular,
+                mmr_lambda: 0.7,
+                community_aware: true,
+            },
+        );
+        let ids: std::collections::HashSet<&str> =
+            v.iter().map(|c| c.id.as_str()).collect();
+        assert!(
+            ids.contains("b0"),
+            "community-aware MMR should keep b0; got {ids:?} (stats={stats:?})"
+        );
+    }
+
+    #[test]
+    fn community_flag_off_keeps_default_behavior() {
+        // Identical inputs to the previous test, but flag off → behaves
+        // exactly like un-tagged MMR.
+        let mut v_with = vec![
+            c_with_community("a0", "alpha unique tokens here one", 0),
+            c_with_community("a1", "alpha second different tokens two", 0),
+            c_with_community("a2", "alpha third yet more distinct three", 0),
+            c_with_community("b0", "beta totally other concept four", 1),
+        ];
+        let mut v_without = vec![
+            c("a0", "alpha unique tokens here one"),
+            c("a1", "alpha second different tokens two"),
+            c("a2", "alpha third yet more distinct three"),
+            c("b0", "beta totally other concept four"),
+        ];
+        let stats_with = run_with_options(
+            &mut v_with,
+            45,
+            Options {
+                strategy: Strategy::MmrSubmodular,
+                mmr_lambda: 0.7,
+                community_aware: false,
+            },
+        );
+        let stats_without = run_with(&mut v_without, 45, Strategy::MmrSubmodular, 0.7);
+        let ids_with: Vec<&str> = v_with.iter().map(|c| c.id.as_str()).collect();
+        let ids_without: Vec<&str> = v_without.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids_with, ids_without);
+        assert_eq!(stats_with.kept, stats_without.kept);
     }
 
     #[test]

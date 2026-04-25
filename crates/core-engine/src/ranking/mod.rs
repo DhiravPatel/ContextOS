@@ -19,6 +19,7 @@
 //! dominate the score.
 
 pub mod bm25;
+pub mod rm3;
 pub mod rrf;
 
 use crate::types::{ChunkKind, InputChunk};
@@ -29,13 +30,32 @@ use contextos_utils::tokenize_words;
 pub type Priors = AHashMap<String, f64>;
 
 pub fn run(chunks: &mut Vec<InputChunk>, query: Option<&str>) {
-    run_with_priors(chunks, query, None)
+    run_with_priors_and_options(chunks, query, None, RankingOptions::default())
 }
 
 pub fn run_with_priors(
     chunks: &mut Vec<InputChunk>,
     query: Option<&str>,
     priors: Option<&Priors>,
+) {
+    run_with_priors_and_options(chunks, query, priors, RankingOptions::default())
+}
+
+/// Tunable knobs that the engine can pass through from its config. Kept
+/// separate from `EngineConfig` so the ranking module stays usable by
+/// tests and tools that don't want to construct a full engine.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RankingOptions {
+    /// When true, expand the query via RM3 pseudo-relevance feedback
+    /// before BM25 scoring. Adds one extra BM25 pass.
+    pub rm3: bool,
+}
+
+pub fn run_with_priors_and_options(
+    chunks: &mut Vec<InputChunk>,
+    query: Option<&str>,
+    priors: Option<&Priors>,
+    opts: RankingOptions,
 ) {
     if chunks.len() < 2 {
         return;
@@ -59,7 +79,16 @@ pub fn run_with_priors(
         }
     }
 
-    let query_terms: Vec<String> = query.map(|q| tokenize_words(q)).unwrap_or_default();
+    let mut query_terms: Vec<String> = query.map(|q| tokenize_words(q)).unwrap_or_default();
+    if opts.rm3 && !query_terms.is_empty() {
+        query_terms = rm3::expand_query(
+            &corpus,
+            &query_terms,
+            rm3::DEFAULT_TOP_DOCS,
+            rm3::DEFAULT_TOP_TERMS,
+            rm3::DEFAULT_ALPHA,
+        );
+    }
 
     // Per-ranker score vectors (one entry per chunk index).
     let bm25_scores: Vec<f64> = if query_terms.is_empty() {
@@ -181,6 +210,7 @@ mod tests {
             kind: ChunkKind::Code,
             priority: 0,
             skeleton_hint: false,
+            community: None,
         }
     }
 

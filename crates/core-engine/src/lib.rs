@@ -30,7 +30,7 @@ pub use types::*;
 
 use budget::{Strategy as BudgetStrategy, DEFAULT_MMR_LAMBDA};
 use contextos_tokenizer::estimate_tokens;
-use ranking::Priors;
+use ranking::{Priors, RankingOptions};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -57,6 +57,21 @@ pub struct EngineConfig {
     /// LLM provider prompt-cache hit rate.
     #[serde(default = "default_true")]
     pub enable_cache_order: bool,
+    /// When true, expand the user's query via RM3 pseudo-relevance
+    /// feedback before BM25 scoring. Adds one extra BM25 pass; lifts
+    /// recall by ~10–20% on under-specified queries. Off by default
+    /// because the original BM25 path is fine for most workloads and
+    /// RM3 doubles the BM25 cost.
+    #[serde(default)]
+    pub enable_rm3: bool,
+    /// When true and chunks carry `community` labels (typically from a
+    /// graph-driven Louvain pass), MMR's selection objective is
+    /// extended with a community-coverage term so the budget gets
+    /// spread across topical clusters instead of piling into one. Off
+    /// by default; has no effect when chunks don't carry community
+    /// labels.
+    #[serde(default)]
+    pub enable_louvain_budget: bool,
 }
 
 fn default_mmr_lambda() -> f64 {
@@ -79,6 +94,8 @@ impl Default for EngineConfig {
             budget_strategy: BudgetStrategy::Auto,
             mmr_lambda: DEFAULT_MMR_LAMBDA,
             enable_cache_order: true,
+            enable_rm3: false,
+            enable_louvain_budget: false,
         }
     }
 }
@@ -134,15 +151,25 @@ impl Engine {
         };
 
         if self.config.enable_ranking {
-            ranking::run_with_priors(&mut chunks, input.query.as_deref(), priors);
+            ranking::run_with_priors_and_options(
+                &mut chunks,
+                input.query.as_deref(),
+                priors,
+                RankingOptions {
+                    rm3: self.config.enable_rm3,
+                },
+            );
         }
 
         let budget_stats = if self.config.enable_budget {
-            budget::run_with(
+            budget::run_with_options(
                 &mut chunks,
                 self.config.max_tokens,
-                self.config.budget_strategy,
-                self.config.mmr_lambda,
+                budget::Options {
+                    strategy: self.config.budget_strategy,
+                    mmr_lambda: self.config.mmr_lambda,
+                    community_aware: self.config.enable_louvain_budget,
+                },
             )
         } else {
             budget::Stats {
@@ -205,6 +232,7 @@ mod tests {
             kind: ChunkKind::Code,
             priority: 0,
             skeleton_hint: false,
+            community: None,
         }
     }
 
