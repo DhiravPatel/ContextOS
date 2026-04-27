@@ -15,6 +15,7 @@ fn chunk(id: &str, lang: Language, content: &str) -> InputChunk {
         kind: ChunkKind::Code,
         priority: 0,
         skeleton_hint: false,
+        community: None,
     }
 }
 
@@ -49,8 +50,11 @@ fn realistic_ts_project_gets_at_least_40_percent_reduction() {
         }
     "#;
 
+    // Cache-aware ordering is on by default; disable it here so we can
+    // assert rank-ordered output directly.
     let engine = Engine::new(EngineConfig {
         max_tokens: 100_000,
+        enable_cache_order: false,
         ..Default::default()
     });
     let result = engine.optimize(OptimizationRequest {
@@ -69,6 +73,68 @@ fn realistic_ts_project_gets_at_least_40_percent_reduction() {
     );
     // Query-relevant chunk should be first after ranking.
     assert_eq!(result.chunks[0].id, "c");
+}
+
+#[test]
+fn cache_aware_order_is_stable_across_requests() {
+    // Same chunks fed in different orders should produce the same final
+    // ordering when cache-aware ordering is on. This is what makes provider
+    // prompt caches hit across repeated calls.
+    let engine = Engine::new(EngineConfig {
+        max_tokens: 100_000,
+        enable_dedup: false, // keep all chunks so we can compare order directly
+        ..Default::default()
+    });
+    let cs1 = vec![
+        chunk("zebra", Language::Rust, "fn z() {}"),
+        chunk("alpha", Language::Rust, "fn a() {}"),
+        chunk("middle", Language::Rust, "fn m() {}"),
+    ];
+    let cs2 = vec![cs1[2].clone(), cs1[0].clone(), cs1[1].clone()];
+
+    let r1 = engine.optimize(OptimizationRequest {
+        chunks: cs1,
+        query: None,
+    });
+    let r2 = engine.optimize(OptimizationRequest {
+        chunks: cs2,
+        query: None,
+    });
+
+    let ids1: Vec<&str> = r1.chunks.iter().map(|c| c.id.as_str()).collect();
+    let ids2: Vec<&str> = r2.chunks.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids1, ids2);
+}
+
+#[test]
+fn mmr_keeps_diverse_chunks_under_tight_budget() {
+    // Two near-duplicate chunks plus one unique chunk; budget only fits two.
+    // MMR with default lambda should prefer the unique chunk over the
+    // second duplicate, which a pure rank-ordered greedy would not do.
+    let dup = "// dedup-resistant: identical lines below\nlet a = 1;\nlet b = 2;\nlet c = 3;\n";
+    let unique = "fn distinct_function_name() -> Result<()> { Ok(()) }";
+    let engine = Engine::new(EngineConfig {
+        max_tokens: 18,
+        enable_dedup: false,
+        enable_compress: false,
+        enable_skeleton: false,
+        enable_cache_order: false,
+        ..Default::default()
+    });
+    let result = engine.optimize(OptimizationRequest {
+        chunks: vec![
+            chunk("d1", Language::Rust, dup),
+            chunk("d2", Language::Rust, dup),
+            chunk("u", Language::Rust, unique),
+        ],
+        query: None,
+    });
+    let ids: std::collections::HashSet<&str> =
+        result.chunks.iter().map(|c| c.id.as_str()).collect();
+    assert!(
+        ids.contains("u"),
+        "MMR must include the unique chunk; got {ids:?}"
+    );
 }
 
 #[test]

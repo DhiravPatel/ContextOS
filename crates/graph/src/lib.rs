@@ -14,9 +14,14 @@
 //! Initial build of a 2k-file repo ≈ 2s; updates ≈ 50–300ms depending on
 //! fan-in of changed files.
 
+pub mod betweenness;
 pub mod builder;
+pub mod community;
 pub mod pagerank;
 pub mod query;
+pub mod reachable;
+pub mod rwr;
+pub mod steiner;
 pub mod store;
 pub mod types;
 

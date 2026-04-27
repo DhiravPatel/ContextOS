@@ -38,6 +38,13 @@ pub struct InputChunk {
     /// "transitive dependency, relevant but not central" files.
     #[serde(default)]
     pub skeleton_hint: bool,
+    /// Optional Louvain community label (typically derived from the code
+    /// graph). When `EngineConfig::enable_louvain_budget` is true and this
+    /// field is populated for at least some chunks, MMR adds a coverage
+    /// bonus for picking from under-represented communities. Default
+    /// `None` → no behavior change vs. earlier engine versions.
+    #[serde(default)]
+    pub community: Option<u32>,
 }
 
 fn default_lang() -> Language {
