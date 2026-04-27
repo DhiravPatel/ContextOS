@@ -3,6 +3,9 @@
 //! Kept intentionally tiny: hashing, language detection, light text helpers.
 //! Anything bigger belongs in a domain crate (parser, core-engine, ...).
 
+pub mod usage;
+pub use usage::{record as record_usage, read_all as read_usage, UsageRecord};
+
 use ahash::AHasher;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};

@@ -11,3 +11,8 @@ Cargo.lock
 .env
 .idea/
 .vscode/settings.json
+
+# Local Claude Code / MCP state — created per-project by `contextos init`.
+.claude/
+.mcp.json
+.contextos/

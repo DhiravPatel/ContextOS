@@ -3,6 +3,13 @@ name = "contextos-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Local-first, lossless token-reduction engine for AI coding assistants. Graph-aware context selection + AST-aware compression. CLI + MCP server for Claude Code, Cursor, etc."
+keywords = ["llm", "tokens", "context", "code", "mcp"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "../../README.md"
+homepage = "https://github.com/DhiravPatel/ContextOS"
 
 [[bin]]
 name = "contextos"

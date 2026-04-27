@@ -171,7 +171,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "contextos-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "contextos-core-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ahash",
  "contextos-parser",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "contextos-graph"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ahash",
  "anyhow",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "contextos-parser"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "contextos-utils",
  "once_cell",
@@ -247,18 +247,20 @@ dependencies = [
 
 [[package]]
 name = "contextos-tokenizer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "contextos-utils"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ahash",
  "once_cell",
  "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

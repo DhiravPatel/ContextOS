@@ -114,24 +114,96 @@ ContextOS/
 
 ---
 
-## Quickstart
+## Install (terminal, no editor extension needed)
+
+ContextOS ships as a single static binary. After install it works with **Claude Code** out of the box via MCP — no VS Code marketplace, no Node, no Python.
+
+### One command, fully wired
+
+From inside the project you want to use it in:
 
 ```bash
-# Prerequisites: Rust stable, Node.js ≥18
-./infra/scripts/build.sh
+cd /path/to/your/repo
+curl -fsSL https://raw.githubusercontent.com/DhiravPatel/ContextOS/main/infra/scripts/install.sh | bash
+```
 
+That single command:
+
+1. Detects your OS + architecture (macOS arm64/x64, Linux x64/arm64).
+2. Downloads the matching `contextos` binary from the latest GitHub Release.
+3. Verifies the SHA-256 checksum against `SHA256SUMS` in the same release.
+4. Drops it into `~/.local/bin/contextos` (override with `CONTEXTOS_INSTALL_DIR=...`).
+5. Detects you're inside a project (looks for `.git`, `package.json`, `Cargo.toml`, etc.) and runs `contextos init` for you — builds the graph **and** writes `.mcp.json` for Claude Code.
+
+After that finishes, open Claude Code in this project and ContextOS is already wired up. No follow-up commands.
+
+### Adding a second project later
+
+The binary is installed once; only the per-project wiring needs to be repeated:
+
+```bash
+cd /path/to/another/repo
+contextos init
+```
+
+That's `build + install` in one shot.
+
+### Seeing how much you've saved
+
+ContextOS records every `optimize` call (CLI or MCP) into an append-only log at `~/.contextos/usage.jsonl`. Show the dashboard with:
+
+```bash
+contextos savings              # global scope, all projects
+contextos savings --project .  # only this project
+contextos savings --top 20     # show 20 rows in the by-command table
+contextos savings --no-color   # plain output (for redirection / CI)
+```
+
+Output is a colored ASCII summary: total tokens in/out, cumulative savings, average reduction %, total exec time, plus a per-query breakdown with an impact bar. The log only stores token counts, the user's query string, and the project root — no source code ever leaves the file. Disable telemetry with `CONTEXTOS_NO_USAGE=1`.
+
+### Useful overrides
+
+```bash
+CONTEXTOS_VERSION=v0.2.1 curl … | bash      # pin a release
+CONTEXTOS_NO_INIT=1     curl … | bash       # install binary only, no auto-wire
+CONTEXTOS_SKIP_BUILD=1  curl … | bash       # auto-wire but defer graph build
+CONTEXTOS_INSTALL_DIR=/usr/local/bin curl … | bash
+```
+
+### Windows
+
+Download `contextos-win32-x64.zip` from the [latest release](https://github.com/DhiravPatel/ContextOS/releases/latest), extract, and add the folder to `PATH`. Then:
+
+```powershell
+cd C:\path\to\your\repo
+contextos init
+```
+
+### Build from source
+
+```bash
+# Prerequisites: Rust stable, Node.js ≥18 (only needed for the optional VS Code extension)
+./infra/scripts/build.sh
+./target/release/contextos --help
+```
+
+---
+
+## Quickstart (after install)
+
+```bash
 # Index your repo
-./target/release/contextos build --root /path/to/your/repo
+contextos build --root /path/to/your/repo
 
 # See the blast radius of changed files
-git diff --name-only | xargs ./target/release/contextos impact --root /path/to/your/repo
+git diff --name-only | xargs contextos impact --root /path/to/your/repo
 
-# Or run as a live MCP server (wire to Claude Code / Cursor config)
-./target/release/contextos serve --root /path/to/your/repo
+# Run as a live MCP server (wire to Claude Code / Cursor config)
+contextos serve --root /path/to/your/repo
 
 # Or pipe raw JSON through the pipeline (no graph needed)
 echo '{"chunks":[{"id":"a","language":"typescript","content":"// hi\nfn add(){}","kind":"code","priority":0,"skeleton_hint":false}],"query":"addition"}' \
-  | ./target/release/contextos optimize --pretty
+  | contextos optimize --pretty
 ```
 
 ---
@@ -148,6 +220,8 @@ echo '{"chunks":[{"id":"a","language":"typescript","content":"// hi\nfn add(){}"
 | `contextos serve --root <path>` | MCP JSON-RPC server on stdio |
 | `contextos stats --root <path>` | Graph node / edge / file counts |
 | `contextos optimize [--max-tokens N] [--pretty]` | Run the pipeline; stdin → stdout JSON |
+| `contextos savings [--top N] [--project <path>] [--no-color]` | Show cumulative token savings dashboard |
+| `contextos init [--root <path>] [--skip-build]` | One-shot setup: build graph + wire Claude Code |
 
 ---
 

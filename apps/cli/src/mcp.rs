@@ -213,11 +213,25 @@ fn call_tool(graph: &Graph, _root: &Path, params: &Value) -> anyhow::Result<Valu
                 "chunks": args.get("chunks").cloned().unwrap_or(json!([])),
                 "query": args.get("query").cloned(),
             }))?;
+            let chunks_in = request.chunks.len();
+            let query_for_log = request.query.clone();
             let mut cfg = EngineConfig::default();
             if let Some(t) = max_tokens {
                 cfg.max_tokens = t;
             }
             let result = Engine::new(cfg).optimize(request);
+            contextos_utils::record_usage(contextos_utils::UsageRecord {
+                ts: 0,
+                in_tokens: result.original_tokens,
+                out_tokens: result.final_tokens,
+                saved_tokens: result.tokens_saved,
+                elapsed_ms: result.elapsed_ms,
+                query: query_for_log,
+                chunks_in,
+                chunks_out: result.chunks.len(),
+                source: "mcp".into(),
+                project: Some(graph.root.to_string_lossy().into_owned()),
+            });
             Ok(wrap_text(&serde_json::to_string_pretty(&result)?))
         }
         "build_graph" => {

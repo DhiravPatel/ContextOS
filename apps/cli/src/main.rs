@@ -85,6 +85,17 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
+    /// One-shot setup: build the graph and wire Claude Code in a single
+    /// command. Equivalent to running `build` then `install`.
+    Init {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Skip the graph build (only write `.mcp.json`). Useful if the
+        /// graph has already been built or you want zero-cost first
+        /// run — Claude Code will index lazily on first MCP call.
+        #[arg(long, default_value_t = false)]
+        skip_build: bool,
+    },
     /// Auto-configure Claude Code (writes .mcp.json + .claude/settings.local.json).
     Install {
         #[arg(long, default_value = ".")]
@@ -99,6 +110,20 @@ enum Cmd {
     Stats {
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// Show cumulative token savings across all `optimize` calls,
+    /// CLI + MCP combined. Reads `~/.contextos/usage.jsonl`. Output is
+    /// a colored ASCII dashboard.
+    Savings {
+        /// Top N rows to show in the by-query table.
+        #[arg(long, default_value = "10")]
+        top: usize,
+        /// Filter to a specific project root (default: all projects).
+        #[arg(long)]
+        project: Option<PathBuf>,
+        /// Skip the colored output (useful when redirecting to a file).
+        #[arg(long, default_value_t = false)]
+        no_color: bool,
     },
     /// Print the CLI version.
     Version,
@@ -123,9 +148,15 @@ fn main() -> Result<()> {
         Cmd::Skeleton { root, path } => run_skeleton(&root, &path),
         Cmd::Watch { root } => watch::run(&root),
         Cmd::Serve { root } => mcp::serve(&root),
+        Cmd::Init { root, skip_build } => run_init(&root, skip_build),
         Cmd::Install { root } => run_install(&root),
         Cmd::Uninstall { root } => run_uninstall(&root),
         Cmd::Stats { root } => run_stats(&root),
+        Cmd::Savings {
+            top,
+            project,
+            no_color,
+        } => run_savings(top, project.as_deref(), no_color),
     }
 }
 
@@ -140,12 +171,33 @@ fn run_optimize(
     let raw = read_input(input)?;
     let request: OptimizationRequest = serde_json::from_str(&raw)
         .context("failed to parse OptimizationRequest JSON")?;
+    let chunks_in = request.chunks.len();
+    let query = request.query.clone();
     let mut cfg = EngineConfig::default();
     if let Some(t) = max_tokens {
         cfg.max_tokens = t;
     }
     let engine = Engine::new(cfg);
     let result: OptimizationResult = engine.optimize(request);
+
+    // Telemetry: append a UsageRecord to ~/.contextos/usage.jsonl so
+    // `contextos savings` can show cumulative reductions later. No-op
+    // when CONTEXTOS_NO_USAGE is set.
+    contextos_utils::record_usage(contextos_utils::UsageRecord {
+        ts: 0, // filled in by record()
+        in_tokens: result.original_tokens,
+        out_tokens: result.final_tokens,
+        saved_tokens: result.tokens_saved,
+        elapsed_ms: result.elapsed_ms,
+        query,
+        chunks_in,
+        chunks_out: result.chunks.len(),
+        source: "cli".into(),
+        project: std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned()),
+    });
+
     let serialized = if pretty {
         serde_json::to_string_pretty(&result)?
     } else {
@@ -238,6 +290,37 @@ fn run_install(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Single-command setup: index the repo and wire Claude Code in one shot.
+/// Used by `install.sh` so `curl … | bash` from inside a project directory
+/// leaves the user with a fully-functional setup, no follow-up commands.
+fn run_init(root: &Path, skip_build: bool) -> Result<()> {
+    if !skip_build {
+        eprintln!("ContextOS init [1/2] indexing repo at {}…", root.display());
+        let graph = Graph::open(root)?;
+        let report = graph.builder().build()?;
+        eprintln!(
+            "  built: scanned={} reparsed={} nodes={} edges={}",
+            report.files_scanned,
+            report.files_reparsed,
+            report.nodes_written,
+            report.edges_written,
+        );
+    } else {
+        eprintln!("ContextOS init [1/2] skipping build (--skip-build)");
+    }
+    eprintln!("ContextOS init [2/2] wiring Claude Code…");
+    let report = install::install(root)?;
+    if report.already_configured {
+        eprintln!("  Claude Code already configured for this project — no changes.");
+    } else {
+        eprintln!("  wrote {}", report.mcp_json_path.display());
+        eprintln!("  wrote {}", report.settings_path.display());
+    }
+    eprintln!();
+    eprintln!("Done. Open Claude Code in this project and ContextOS will be active.");
+    Ok(())
+}
+
 fn run_uninstall(root: &Path) -> Result<()> {
     install::uninstall(root)?;
     println!("uninstall: removed ContextOS entries from .mcp.json + .claude/settings.local.json");
@@ -249,6 +332,250 @@ fn run_stats(root: &Path) -> Result<()> {
     let (nodes, edges, files) = graph.store.stats()?;
     println!("nodes={nodes} edges={edges} files={files}");
     Ok(())
+}
+
+// ---- savings dashboard --------------------------------------------------
+
+/// ANSI helpers. Output is written via `println!` but each colored
+/// segment is wrapped explicitly so we can disable on `--no-color`.
+struct Style {
+    enabled: bool,
+}
+
+impl Style {
+    fn paint(&self, code: &str, s: &str) -> String {
+        if self.enabled {
+            format!("\x1b[{code}m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+    fn cyan(&self, s: &str) -> String { self.paint("36", s) }
+    fn green(&self, s: &str) -> String { self.paint("32", s) }
+    fn yellow(&self, s: &str) -> String { self.paint("33", s) }
+    fn red(&self, s: &str) -> String { self.paint("31", s) }
+    fn bold(&self, s: &str) -> String { self.paint("1", s) }
+    fn dim(&self, s: &str) -> String { self.paint("2", s) }
+    fn header(&self, label: &str) -> String {
+        let inner = format!(" {label} ");
+        if self.enabled {
+            format!("\x1b[7;36m{inner}\x1b[0m")
+        } else {
+            format!("[ {label} ]")
+        }
+    }
+}
+
+fn run_savings(top: usize, project_filter: Option<&Path>, no_color: bool) -> Result<()> {
+    let s = Style {
+        enabled: !no_color && atty_stdout(),
+    };
+    let records = contextos_utils::read_usage();
+    let project_filter_canon = project_filter
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.to_string_lossy().into_owned());
+
+    let filtered: Vec<&contextos_utils::UsageRecord> = records
+        .iter()
+        .filter(|r| match (&project_filter_canon, &r.project) {
+            (Some(want), Some(got)) => got == want,
+            (Some(_), None) => false,
+            _ => true,
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        let scope = if project_filter.is_some() {
+            "this project"
+        } else {
+            "all projects"
+        };
+        println!("{}", s.header("ContextOS Token Savings"));
+        println!();
+        println!(
+            "  No usage data for {scope} yet. Run a few `contextos optimize` calls\n  (or use ContextOS via Claude Code's MCP), then check back."
+        );
+        return Ok(());
+    }
+
+    let total_count = filtered.len();
+    let total_in: usize = filtered.iter().map(|r| r.in_tokens).sum();
+    let total_out: usize = filtered.iter().map(|r| r.out_tokens).sum();
+    let total_saved: usize = filtered.iter().map(|r| r.saved_tokens).sum();
+    let total_elapsed_ms: f64 = filtered.iter().map(|r| r.elapsed_ms).sum();
+    let avg_elapsed_ms = total_elapsed_ms / total_count as f64;
+    let pct = if total_in == 0 {
+        0.0
+    } else {
+        (total_saved as f64 / total_in as f64) * 100.0
+    };
+
+    let scope_label = if project_filter.is_some() {
+        "Project Scope"
+    } else {
+        "Global Scope"
+    };
+    println!(
+        "{}",
+        s.header(&format!("ContextOS Token Savings ({scope_label})"))
+    );
+    println!();
+    println!("  Total commands:    {}", s.bold(&format!("{total_count}")));
+    println!("  Input tokens:      {}", humanize(total_in));
+    println!("  Output tokens:     {}", humanize(total_out));
+    println!(
+        "  Tokens saved:      {} ({})",
+        s.bold(&humanize(total_saved)),
+        color_pct(&s, pct)
+    );
+    println!(
+        "  Total exec time:   {} (avg {})",
+        humanize_ms(total_elapsed_ms),
+        humanize_ms(avg_elapsed_ms)
+    );
+    println!(
+        "  Efficiency meter:  {}",
+        meter_bar(&s, pct, 30)
+    );
+    println!();
+    println!("{}", s.header("By Command"));
+    println!();
+
+    // Aggregate by query (or "(no query)" bucket).
+    use std::collections::HashMap;
+    #[derive(Default)]
+    struct Agg {
+        count: usize,
+        saved: usize,
+        in_tokens: usize,
+        elapsed_ms: f64,
+    }
+    let mut by_query: HashMap<String, Agg> = HashMap::new();
+    for r in &filtered {
+        let key = r
+            .query
+            .as_deref()
+            .map(|q| q.trim().to_string())
+            .filter(|q| !q.is_empty())
+            .unwrap_or_else(|| "(no query)".into());
+        let entry = by_query.entry(key).or_default();
+        entry.count += 1;
+        entry.saved += r.saved_tokens;
+        entry.in_tokens += r.in_tokens;
+        entry.elapsed_ms += r.elapsed_ms;
+    }
+    let mut rows: Vec<(String, Agg)> = by_query.into_iter().collect();
+    rows.sort_by(|a, b| b.1.saved.cmp(&a.1.saved));
+    let max_saved = rows.iter().map(|(_, a)| a.saved).max().unwrap_or(0).max(1);
+
+    println!(
+        "  {:>3}  {:<32}  {:>5}  {:>7}  {:>6}  {:>7}  {}",
+        "#", "Command", "Count", "Saved", "Avg%", "Time", "Impact"
+    );
+    println!("  {}", s.dim(&"─".repeat(78)));
+    for (i, (q, a)) in rows.iter().take(top).enumerate() {
+        let avg = if a.in_tokens == 0 {
+            0.0
+        } else {
+            (a.saved as f64 / a.in_tokens as f64) * 100.0
+        };
+        let cmd_short = truncate(q, 32);
+        let bar = impact_bar(&s, a.saved, max_saved, 12);
+        println!(
+            "  {:>3}  {:<32}  {:>5}  {:>7}  {:>6}  {:>7}  {}",
+            i + 1,
+            cmd_short,
+            a.count,
+            humanize(a.saved),
+            color_pct(&s, avg),
+            humanize_ms(a.elapsed_ms),
+            bar,
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn humanize(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+fn humanize_ms(ms: f64) -> String {
+    if ms >= 1_000.0 {
+        format!("{:.1}s", ms / 1_000.0)
+    } else {
+        format!("{:.0}ms", ms)
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{cut}…")
+}
+
+fn color_pct(s: &Style, pct: f64) -> String {
+    let txt = format!("{pct:.1}%");
+    if pct >= 60.0 {
+        s.green(&txt)
+    } else if pct >= 30.0 {
+        s.yellow(&txt)
+    } else {
+        s.red(&txt)
+    }
+}
+
+fn meter_bar(s: &Style, pct: f64, width: usize) -> String {
+    let pct_clamped = pct.clamp(0.0, 100.0);
+    let filled = ((pct_clamped / 100.0) * width as f64).round() as usize;
+    let empty = width.saturating_sub(filled);
+    let bar = format!(
+        "{}{}",
+        "█".repeat(filled),
+        s.dim(&"░".repeat(empty)),
+    );
+    format!("{}  {}", s.green(&bar), color_pct(s, pct))
+}
+
+fn impact_bar(s: &Style, saved: usize, max: usize, width: usize) -> String {
+    let filled = if max == 0 {
+        0
+    } else {
+        ((saved as f64 / max as f64) * width as f64).round() as usize
+    };
+    let empty = width.saturating_sub(filled);
+    format!("{}{}", s.cyan(&"▆".repeat(filled)), s.dim(&"·".repeat(empty)))
+}
+
+fn atty_stdout() -> bool {
+    // Cheap, dependency-free isatty check via libc, gated to unix.
+    #[cfg(unix)]
+    {
+        // SAFETY: isatty(fd) is a thread-safe syscall with no side effects.
+        unsafe { libc_isatty(1) != 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn isatty(fd: i32) -> i32;
+}
+
+#[cfg(unix)]
+unsafe fn libc_isatty(fd: i32) -> i32 {
+    unsafe { isatty(fd) }
 }
 
 // ---- io helpers --------------------------------------------------------

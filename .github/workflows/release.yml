@@ -1,0 +1,137 @@
+name: Release
+
+# Triggered when a tag matching `v*` is pushed (e.g. v0.2.1, v1.0.0).
+# Builds the `contextos` CLI binary for every supported platform and
+# attaches each build to a GitHub Release. The accompanying install.sh
+# (in infra/scripts/) downloads from these release assets.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual trigger so we can dry-run without cutting a real tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to publish (e.g. v0.2.1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            asset: contextos-darwin-arm64
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            asset: contextos-darwin-x64
+            archive: tar.gz
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            asset: contextos-linux-x64
+            archive: tar.gz
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            asset: contextos-linux-arm64
+            archive: tar.gz
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: contextos-win32-x64
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross (Linux musl targets)
+        if: matrix.cross == true
+        run: cargo install --locked cross
+
+      - name: Build
+        shell: bash
+        run: |
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.target }} --bin contextos
+          else
+            cargo build --release --target ${{ matrix.target }} --bin contextos
+          fi
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            cp "target/${{ matrix.target }}/release/contextos.exe" "dist/contextos.exe"
+            cd dist && 7z a "${{ matrix.asset }}.zip" "contextos.exe"
+          else
+            cp "target/${{ matrix.target }}/release/contextos" "dist/contextos"
+            cd dist && tar -czf "${{ matrix.asset }}.tar.gz" "contextos"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compute checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+
+      - name: Resolve tag name
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF##*/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: |
+            dist/contextos-darwin-arm64.tar.gz
+            dist/contextos-darwin-x64.tar.gz
+            dist/contextos-linux-x64.tar.gz
+            dist/contextos-linux-arm64.tar.gz
+            dist/contextos-win32-x64.zip
+            dist/SHA256SUMS
