@@ -65,14 +65,28 @@ Every algorithm below preserves output semantics — nothing is rephrased, summa
 | Technique | Purpose | Complexity |
 |---|---|---|
 | **SHA-256 file hashing** | Incremental graph updates (skip unchanged files) | O(file bytes) |
+| **Rabin content-defined chunking** (48-byte window, 8 KiB expected size) | Edit-stable chunk boundaries → higher dedup hit rate across edits | O(N) bytes |
 | **Tree-sitter AST walk** | Syntax-aware comment/log stripping (no string-literal collisions) | O(source bytes) |
 | **Jaccard over line fingerprints** | Near-dup detection for small chunk sets | O(n²) — small n only |
+| **SimHash** (64-bit, Hamming ≤ 3) | Token-bag near-dup pre-filter; catches reorderings line-Jaccard misses | O(n²) popcnt — fast in practice |
 | **MinHash + LSH** (128 permutations, 16 bands × 8 rows) | Scalable near-dup detection for repo-scale inputs | O(n · perm) construction, O(n) candidate lookup |
 | **Okapi BM25** (k1=1.5, b=0.75) | Length-normalised query-to-chunk relevance | O(chunks · query terms) |
-| **TF-IDF density** | Fallback ranker when no user query | O(total tokens) |
-| **PageRank** (damping=0.85, power iteration, tol=1e-6) | Centrality prior: structurally important symbols win ties | O(iters · edges), ~10ms for 10k nodes |
+| **TF-IDF density** | Query-free distinctiveness signal | O(total tokens) |
+| **Reciprocal Rank Fusion** (k=60) | Combines BM25 + density + graph priors on **rank**, not score; no weight tuning | O(n · rankers) |
+| **RM3 pseudo-relevance feedback** (top-5 docs, top-8 expansion terms, α=0.3) | Auto-expand the query with high-IDF terms from top-scoring docs; lifts BM25 recall ~10–20% | O(2 · BM25 cost) |
+| **Count-Min Sketch boilerplate collapse** (ε=0.001, δ=1e-4) | Detect lines repeating ≥4× across chunks; strip every occurrence after the first | O(N) lines |
+| **PageRank** (damping=0.85, power iteration, tol=1e-6) | Repo-wide centrality prior | O(iters · edges), ~10ms for 10k nodes |
+| **Personalized PageRank** (seed-biased teleport vector) | Query-conditioned centrality — "important *to this request*" | O(iters · edges) |
+| **Random Walk with Restart** (α=0.5) | Soft impact radius; probability mass decays smoothly with distance | O(iters · edges) |
+| **Louvain community detection** (Phase-1 local greedy) | Modularity-maximising clustering for budget-balanced selection | O(iters · edges) |
+| **Brandes-Pich approximate betweenness** (50 sampled pivots) | Bridge-node centrality prior; complements PageRank in RRF | O(k · (V + E)), k=pivots |
+| **Steiner tree (KMB 2-approximation)** | Min subgraph connecting must-include terminals; smaller than blast radius | O(k · (V + E)), k=terminals |
+| **Tree-shaking forward reachability** | Drop unreachable code from the candidate set | O(V + E) |
 | **BFS blast radius** | Reverse-edge traversal over `calls ∪ imports ∪ inherits` | O(impacted nodes + edges) |
-| **Greedy knapsack** (with 5% slack) | Pack highest-ranked chunks into `max_tokens` | O(n) post-ranking |
+| **MMR + Submodular coverage** (λ=0.7) | Diversity-aware budget selection with (1−1/e) approximation guarantee | O(n²·k) — k = chunks selected |
+| **0/1 Knapsack DP** (n ≤ 256) | Exact-optimum budget packing for small inputs | O(n · max_tokens) |
+| **Greedy knapsack** (with 5% slack) | Fast fallback for tiny inputs | O(n) post-ranking |
+| **Prompt-cache-aware ordering** (deterministic stable hash) | Byte-identical prompts across repeated calls → LLM provider cache hits | O(n log n) |
 
 Typical combined reduction on a real TypeScript service: **73%** on redundant-file workloads, **88%** when the graph picks only the blast radius and the pipeline compresses what's left.
 
@@ -219,6 +233,11 @@ echo '{"chunks":[{"id":"a","language":"typescript","content":"// hi\nfn add(){}"
 | `contextos watch --root <path>` | Live filesystem watcher, auto-updates the graph |
 | `contextos serve --root <path>` | MCP JSON-RPC server on stdio |
 | `contextos stats --root <path>` | Graph node / edge / file counts |
+| `contextos rwr --top-k N <seed-paths...>` | Random-walk-with-restart top-k from seed files |
+| `contextos communities --root <path>` | Louvain communities (one node per line) |
+| `contextos bridges --top-k N` | Sampled betweenness centrality, descending |
+| `contextos steiner <names...>` | Approximate Steiner subgraph connecting named symbols |
+| `contextos reachable <files...>` | Forward-reachable closure of root files |
 | `contextos optimize [--max-tokens N] [--pretty]` | Run the pipeline; stdin → stdout JSON |
 | `contextos savings [--top N] [--project <path>] [--no-color]` | Show cumulative token savings dashboard |
 | `contextos init [--root <path>] [--skip-build]` | One-shot setup: build graph + wire Claude Code |

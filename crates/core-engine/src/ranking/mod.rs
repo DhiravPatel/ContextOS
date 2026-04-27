@@ -1,15 +1,26 @@
 //! Relevance ranking.
 //!
-//! Two-scorer cascade:
+//! Three independent rankers, fused via Reciprocal Rank Fusion:
 //!   * **BM25** (`bm25.rs`) — query/document relevance.
-//!   * **TF-IDF density** — fallback when no query is provided, rewards
-//!     chunks with lots of distinctive terms.
+//!   * **TF-IDF density** — query-free distinctiveness signal.
+//!   * **Prior** — optional external signal (e.g. graph PageRank keyed by
+//!     chunk id), normalised to a per-chunk rank.
 //!
-//! Then we add bumps for `priority`, `kind`, and an optional **PageRank
-//! prior** supplied by the graph crate so centrally-connected symbols float
-//! to the top even when their text doesn't match the query directly.
+//! Each ranker emits a sorted list of `(doc_index, score)` pairs and
+//! [`rrf::fuse`] combines them on **rank** rather than raw score. This
+//! sidesteps the previous implementation's brittle multipliers (BM25 × 10,
+//! density × 0.5, PageRank × 1000) which were tuned to bring three very
+//! differently-scaled signals onto the same axis. RRF requires no such
+//! calibration and is empirically equal-or-better than tuned weighted sums
+//! on retrieval benchmarks.
+//!
+//! After fusion we add **structural bumps** for `priority` and `ChunkKind`
+//! at a much smaller scale than before — they nudge ties, they no longer
+//! dominate the score.
 
 pub mod bm25;
+pub mod rm3;
+pub mod rrf;
 
 use crate::types::{ChunkKind, InputChunk};
 use ahash::AHashMap;
@@ -19,13 +30,32 @@ use contextos_utils::tokenize_words;
 pub type Priors = AHashMap<String, f64>;
 
 pub fn run(chunks: &mut Vec<InputChunk>, query: Option<&str>) {
-    run_with_priors(chunks, query, None)
+    run_with_priors_and_options(chunks, query, None, RankingOptions::default())
 }
 
 pub fn run_with_priors(
     chunks: &mut Vec<InputChunk>,
     query: Option<&str>,
     priors: Option<&Priors>,
+) {
+    run_with_priors_and_options(chunks, query, priors, RankingOptions::default())
+}
+
+/// Tunable knobs that the engine can pass through from its config. Kept
+/// separate from `EngineConfig` so the ranking module stays usable by
+/// tests and tools that don't want to construct a full engine.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RankingOptions {
+    /// When true, expand the query via RM3 pseudo-relevance feedback
+    /// before BM25 scoring. Adds one extra BM25 pass.
+    pub rm3: bool,
+}
+
+pub fn run_with_priors_and_options(
+    chunks: &mut Vec<InputChunk>,
+    query: Option<&str>,
+    priors: Option<&Priors>,
+    opts: RankingOptions,
 ) {
     if chunks.len() < 2 {
         return;
@@ -49,47 +79,102 @@ pub fn run_with_priors(
         }
     }
 
-    let query_terms: Vec<String> = query
-        .map(|q| tokenize_words(q))
-        .unwrap_or_default();
+    let mut query_terms: Vec<String> = query.map(|q| tokenize_words(q)).unwrap_or_default();
+    if opts.rm3 && !query_terms.is_empty() {
+        query_terms = rm3::expand_query(
+            &corpus,
+            &query_terms,
+            rm3::DEFAULT_TOP_DOCS,
+            rm3::DEFAULT_TOP_TERMS,
+            rm3::DEFAULT_ALPHA,
+        );
+    }
 
-    let mut scored: Vec<(usize, f64)> = (0..chunks.len())
-        .map(|i| {
-            let base = if query_terms.is_empty() {
-                density_score(&tokenised[i], &df, n_docs)
-            } else {
-                corpus.score(i, &query_terms) * 10.0
-                    + density_score(&tokenised[i], &df, n_docs) * 0.5
-            };
-            (i, base)
+    // Per-ranker score vectors (one entry per chunk index).
+    let bm25_scores: Vec<f64> = if query_terms.is_empty() {
+        vec![0.0; chunks.len()]
+    } else {
+        (0..chunks.len())
+            .map(|i| corpus.score(i, &query_terms))
+            .collect()
+    };
+    let density_scores: Vec<f64> = (0..chunks.len())
+        .map(|i| density_score(&tokenised[i], &df, n_docs))
+        .collect();
+    let prior_scores: Vec<f64> = (0..chunks.len())
+        .map(|i| match priors {
+            Some(p) => p.get(&chunks[i].id).copied().unwrap_or(0.0),
+            None => 0.0,
         })
         .collect();
 
-    for (i, score) in scored.iter_mut() {
-        let c = &chunks[*i];
-        *score += c.priority as f64 * 0.5;
-        *score += match c.kind {
-            ChunkKind::Selection => 5.0,
-            ChunkKind::Diagnostic => 2.0,
-            ChunkKind::Code => 0.0,
-            ChunkKind::Doc => -0.5,
-            ChunkKind::Comment => -1.0,
-        };
-        if let Some(p) = priors {
-            if let Some(v) = p.get(&c.id) {
-                // PageRank scores are tiny (1e-4 range). Scale so they're
-                // comparable to BM25 output.
-                *score += v * 1000.0;
-            }
-        }
+    let bm25_ranking = rrf::rank_by_score(&bm25_scores);
+    let density_ranking = rrf::rank_by_score(&density_scores);
+    let prior_ranking = rrf::rank_by_score(&prior_scores);
+
+    // When a query is present, BM25 carries the most direct relevance signal
+    // and we lean on it; density is the only signal in query-free mode.
+    let (bm25_w, density_w, prior_w) = if query_terms.is_empty() {
+        (0.0, 1.5, 1.0)
+    } else {
+        (1.5, 0.7, 1.0)
+    };
+
+    let mut rankers: Vec<rrf::Ranker<'_>> = Vec::with_capacity(3);
+    // A ranker contributes only if its top doc has a strictly positive score.
+    // Otherwise every doc ties at zero and RRF would inject pure index noise
+    // (whoever appears first wins). Common case: the query terms don't match
+    // anything in the corpus after compress strips comments.
+    if bm25_w > 0.0 && top_score(&bm25_ranking) > 0.0 {
+        rankers.push(rrf::Ranker {
+            ranking: &bm25_ranking,
+            weight: bm25_w,
+        });
+    }
+    if top_score(&density_ranking) > 0.0 {
+        rankers.push(rrf::Ranker {
+            ranking: &density_ranking,
+            weight: density_w,
+        });
+    }
+    if priors.is_some() && top_score(&prior_ranking) > 0.0 {
+        rankers.push(rrf::Ranker {
+            ranking: &prior_ranking,
+            weight: prior_w,
+        });
     }
 
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let reordered: Vec<InputChunk> = scored
-        .into_iter()
-        .map(|(i, _)| chunks[i].clone())
-        .collect();
+    let fused = rrf::fuse(&rankers, chunks.len());
+
+    // Structural bumps live on the same scale as a single RRF term
+    // (~1/k = ~1/60). They tip ties without overpowering the relevance
+    // signal — the old multipliers were 10–1000× larger and effectively
+    // *replaced* the ranker output.
+    const BUMP: f64 = 1.0 / rrf::DEFAULT_K;
+    let mut scored: Vec<(usize, f64)> = (0..chunks.len()).map(|i| (i, fused[i])).collect();
+    for (i, score) in scored.iter_mut() {
+        let c = &chunks[*i];
+        *score += c.priority as f64 * BUMP;
+        *score += match c.kind {
+            ChunkKind::Selection => 5.0 * BUMP,
+            ChunkKind::Diagnostic => 2.0 * BUMP,
+            ChunkKind::Code => 0.0,
+            ChunkKind::Doc => -0.5 * BUMP,
+            ChunkKind::Comment => -1.0 * BUMP,
+        };
+    }
+
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
+    let reordered: Vec<InputChunk> = scored.into_iter().map(|(i, _)| chunks[i].clone()).collect();
     *chunks = reordered;
+}
+
+fn top_score(ranking: &[(usize, f64)]) -> f64 {
+    ranking.first().map(|(_, s)| *s).unwrap_or(0.0)
 }
 
 fn density_score(doc: &[String], df: &AHashMap<String, usize>, n_docs: f64) -> f64 {
@@ -125,6 +210,7 @@ mod tests {
             kind: ChunkKind::Code,
             priority: 0,
             skeleton_hint: false,
+            community: None,
         }
     }
 

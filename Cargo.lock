@@ -221,6 +221,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tree-sitter",
  "tree-sitter-javascript",
