@@ -31,8 +31,14 @@ jobs:
             runner: macos-14
             asset: contextos-darwin-arm64
             archive: tar.gz
+          # Intel Mac binary cross-compiled from the arm64 runner. The
+          # macOS toolchain ships SDKs for both architectures; we just
+          # `rustup target add` x86_64-apple-darwin (handled by the
+          # toolchain step below). This avoids the macos-13 runner pool
+          # which has a small shared queue and can starve our jobs for
+          # tens of minutes.
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-14
             asset: contextos-darwin-x64
             archive: tar.gz
           - target: x86_64-unknown-linux-musl
