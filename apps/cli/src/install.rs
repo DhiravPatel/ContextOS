@@ -53,6 +53,66 @@ pub fn install(root: &Path) -> Result<InstallReport> {
     })
 }
 
+/// Make sure the per-project ContextOS state files don't accidentally get
+/// committed. We append to (or create) `<root>/.gitignore`, adding only the
+/// entries that aren't already present. Each line is anchored with `/` so
+/// it matches the repo root only — files with the same name deeper in the
+/// tree (unlikely, but possible) won't be hidden by accident.
+///
+/// This is idempotent: running `contextos init` twice produces no
+/// duplicates. Returns `Ok(true)` if any line was added, `Ok(false)` if
+/// the .gitignore was already up to date.
+pub fn ensure_gitignore(root: &Path) -> Result<bool> {
+    let abs_root = root
+        .canonicalize()
+        .with_context(|| format!("resolving {}", root.display()))?;
+    let path = abs_root.join(".gitignore");
+
+    // Lines we want present. The trailing slash on the directory entries
+    // makes git treat them as directories and not match same-named files.
+    let want: &[&str] = &[
+        "/.mcp.json",
+        "/.claude/",
+        "/.contextos/",
+    ];
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let already: std::collections::HashSet<&str> = existing
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let mut to_add: Vec<&str> = Vec::new();
+    for entry in want {
+        // Match either the anchored form or the bare-name form a user
+        // might already have written (e.g. `.contextos/`, `.mcp.json`).
+        let bare = entry.trim_start_matches('/');
+        if !already.contains(entry) && !already.contains(bare) {
+            to_add.push(entry);
+        }
+    }
+    if to_add.is_empty() {
+        return Ok(false);
+    }
+
+    let mut out = existing.clone();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str("# ContextOS — per-project state, regenerated on demand.\n");
+    for entry in to_add {
+        out.push_str(entry);
+        out.push('\n');
+    }
+    std::fs::write(&path, out)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
 pub fn uninstall(root: &Path) -> Result<()> {
     let abs_root = root
         .canonicalize()

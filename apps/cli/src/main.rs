@@ -542,6 +542,16 @@ fn run_init(root: &Path, skip_build: bool) -> Result<()> {
         eprintln!("  wrote {}", report.mcp_json_path.display());
         eprintln!("  wrote {}", report.settings_path.display());
     }
+    // Auto-update .gitignore so per-project ContextOS state never lands in
+    // a commit by accident. Creates the file if it doesn't exist; appends
+    // to it if it does, idempotently.
+    match install::ensure_gitignore(root) {
+        Ok(true) => eprintln!(
+            "  updated .gitignore (added .mcp.json, .claude/, .contextos/)"
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("  .gitignore update skipped: {e}"),
+    }
     eprintln!();
     eprintln!("Done. Open Claude Code in this project and ContextOS will be active.");
     Ok(())

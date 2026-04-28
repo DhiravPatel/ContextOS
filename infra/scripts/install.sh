@@ -122,15 +122,49 @@ case ":$PATH:" in
 esac
 
 if [[ "$PATH_NEEDS_UPDATE" -eq 1 ]]; then
-  cat <<EOF
+  # Pick the right rc files. We append to every shell config that exists
+  # so the user is set whichever shell they end up in. The append is
+  # idempotent: we skip any file that already references the install dir.
+  RC_CANDIDATES=()
+  for rc in ~/.bashrc ~/.bash_profile ~/.zshrc ~/.profile; do
+    [[ -f "$rc" ]] && RC_CANDIDATES+=("$rc")
+  done
+  # If no rc files exist (rare on a fresh container), pick a sensible
+  # default based on the user's login shell so future shells will work.
+  if [[ ${#RC_CANDIDATES[@]} -eq 0 ]]; then
+    case "${SHELL:-}" in
+      */zsh)  RC_CANDIDATES+=(~/.zshrc) ;;
+      */bash) RC_CANDIDATES+=(~/.bashrc) ;;
+      *)      RC_CANDIDATES+=(~/.profile) ;;
+    esac
+  fi
 
-⚠️  $INSTALL_DIR is not on your PATH.
-Add it to your shell config (then restart the shell):
+  EXPORT_LINE='export PATH="$HOME/.local/bin:$PATH"'
+  PATCHED=0
+  for rc in "${RC_CANDIDATES[@]}"; do
+    if [[ -f "$rc" ]] && grep -q "\.local/bin" "$rc" 2>/dev/null; then
+      continue
+    fi
+    {
+      [[ -f "$rc" ]] && echo ""
+      echo "# Added by ContextOS installer"
+      echo "$EXPORT_LINE"
+    } >> "$rc"
+    ok "added $INSTALL_DIR to $rc"
+    PATCHED=1
+  done
+  if [[ "$PATCHED" -eq 1 ]]; then
+    cat <<EOF
 
-  echo 'export PATH="\$HOME/.local/bin:\$PATH"' >> ~/.zshrc   # zsh (macOS default)
-  echo 'export PATH="\$HOME/.local/bin:\$PATH"' >> ~/.bashrc  # bash
+ℹ️  Restart your terminal (or 'source' the shell config above) so the new
+   PATH applies to your current session. New terminals pick it up
+   automatically.
 
 EOF
+  fi
+  # Make `contextos` work for the rest of THIS install script too — the
+  # auto-init step below needs the binary on PATH.
+  export PATH="$INSTALL_DIR:$PATH"
 fi
 
 # ---- auto-init the current project (or CONTEXTOS_INIT_DIR) -----------------
