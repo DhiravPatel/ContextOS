@@ -138,8 +138,12 @@ pub fn ensure_slash_commands() -> Result<bool> {
         if existing == body {
             return Ok(false);
         }
-        if !existing.starts_with(MARKER) {
-            // User has customised this — leave their version alone.
+        // Detect prior versions of our own file (any of the known
+        // markers) so we can upgrade them. If the marker isn't there
+        // anywhere, the user has customised the file and we leave it
+        // alone.
+        let is_ours = KNOWN_MARKERS.iter().any(|m| existing.contains(m));
+        if !is_ours {
             return Ok(false);
         }
     }
@@ -148,16 +152,27 @@ pub fn ensure_slash_commands() -> Result<bool> {
     Ok(true)
 }
 
-const MARKER: &str = "<!-- contextos:slash-command:savings v1 -->";
+/// Markers we'll recognise as "this file was previously written by the
+/// ContextOS installer". The current version's marker plus any earlier
+/// versions whose layout we want to upgrade in place. Keep the list
+/// growing; never remove an entry.
+const KNOWN_MARKERS: &[&str] = &[
+    "contextos:slash-command:savings v1",
+];
 
-const SAVINGS_SLASH_COMMAND: &str = r#"<!-- contextos:slash-command:savings v1 -->
----
+/// Slash command body. The YAML frontmatter MUST be at the very top of
+/// the file — Claude Code's parser scans for an opening `---` on line 1
+/// and won't recognise the file as a slash command otherwise. The
+/// installer marker therefore lives at the bottom as an HTML comment.
+const SAVINGS_SLASH_COMMAND: &str = r#"---
 description: Show the ContextOS token-savings dashboard for this session
 ---
 
 Call the `savings` tool from the `contextos` MCP server with `scope: "global"`. The tool returns a Markdown dashboard with cumulative token reductions, exec time, and a per-query breakdown table. Display the dashboard exactly as returned, then add a one-line takeaway at the end summarising the headline reduction percentage and total tokens saved.
 
 If the `savings` tool is not available, the ContextOS MCP server isn't wired in this workspace. Tell the user to run `contextos init` from this project's root directory and reopen Claude Code.
+
+<!-- contextos:slash-command:savings v1 -->
 "#;
 
 pub fn uninstall(root: &Path) -> Result<()> {
