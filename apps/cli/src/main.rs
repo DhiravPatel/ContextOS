@@ -564,8 +564,21 @@ fn run_init(root: &Path, skip_build: bool) -> Result<()> {
         Ok(false) => {}
         Err(e) => eprintln!("  .gitignore update skipped: {e}"),
     }
+    // Install user-scoped Claude Code slash commands (one-time per
+    // user — affects every workspace).
+    match install::ensure_slash_commands() {
+        Ok(true) => eprintln!(
+            "  installed /savings slash command at ~/.claude/commands/savings.md"
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("  slash command install skipped: {e}"),
+    }
     eprintln!();
-    eprintln!("Done. Open Claude Code in this project and ContextOS will be active.");
+    eprintln!(
+        "Done. Open Claude Code in this project — ContextOS is active.\n\
+         Type `/savings` in any Claude Code session to see your token-savings\n\
+         dashboard."
+    );
     Ok(())
 }
 

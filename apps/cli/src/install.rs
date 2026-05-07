@@ -113,6 +113,53 @@ pub fn ensure_gitignore(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Install user-scoped Claude Code slash commands at
+/// `~/.claude/commands/`. These give the user direct access to
+/// ContextOS features from inside Claude Code via `/savings` etc.
+///
+/// User-scoped (not project-scoped) so the commands are available
+/// in every workspace once installed, not per-project. Idempotent:
+/// if the command file already exists with our content, we skip it.
+/// We never overwrite a file the user has customised — if the
+/// existing file's first line doesn't match our magic marker, we
+/// leave it alone.
+pub fn ensure_slash_commands() -> Result<bool> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow::anyhow!("can't resolve $HOME for slash commands"))?;
+    let dir = std::path::PathBuf::from(home).join(".claude").join("commands");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+
+    let savings = dir.join("savings.md");
+    let body = SAVINGS_SLASH_COMMAND;
+
+    if let Ok(existing) = std::fs::read_to_string(&savings) {
+        if existing == body {
+            return Ok(false);
+        }
+        if !existing.starts_with(MARKER) {
+            // User has customised this — leave their version alone.
+            return Ok(false);
+        }
+    }
+    std::fs::write(&savings, body)
+        .with_context(|| format!("writing {}", savings.display()))?;
+    Ok(true)
+}
+
+const MARKER: &str = "<!-- contextos:slash-command:savings v1 -->";
+
+const SAVINGS_SLASH_COMMAND: &str = r#"<!-- contextos:slash-command:savings v1 -->
+---
+description: Show the ContextOS token-savings dashboard for this session
+---
+
+Call the `savings` tool from the `contextos` MCP server with `scope: "global"`. The tool returns a Markdown dashboard with cumulative token reductions, exec time, and a per-query breakdown table. Display the dashboard exactly as returned, then add a one-line takeaway at the end summarising the headline reduction percentage and total tokens saved.
+
+If the `savings` tool is not available, the ContextOS MCP server isn't wired in this workspace. Tell the user to run `contextos init` from this project's root directory and reopen Claude Code.
+"#;
+
 pub fn uninstall(root: &Path) -> Result<()> {
     let abs_root = root
         .canonicalize()
