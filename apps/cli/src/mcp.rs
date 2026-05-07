@@ -242,6 +242,7 @@ fn call_tool(graph: &Graph, _root: &Path, params: &Value) -> anyhow::Result<Valu
                 chunks_out: result.chunks.len(),
                 source: "mcp".into(),
                 project: Some(graph.root.to_string_lossy().into_owned()),
+                user: None,
             });
             // Prepend a one-line human-readable summary so Claude Code's
             // tool-output panel surfaces savings without the user having
@@ -506,6 +507,55 @@ fn render_savings(_project_root: &Path, project_filter: Option<&str>, top: usize
         )
         .ok();
     }
+
+    // BY USER section — attributes saves to individual teammates when
+    // a single Claude account is shared across multiple developers.
+    // Only renders when at least one record has a non-empty user tag,
+    // otherwise it's just noise on a single-user machine.
+    let has_any_user = filtered
+        .iter()
+        .any(|r| r.user.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false));
+    if has_any_user {
+        writeln!(out).ok();
+        writeln!(out, "### BY USER").ok();
+        writeln!(out).ok();
+        writeln!(out, "| User | Calls | Saved | Avg % |").ok();
+        writeln!(out, "|---|---:|---:|---:|").ok();
+
+        let mut by_user: HashMap<String, Agg> = HashMap::new();
+        for r in &filtered {
+            let key = r
+                .user
+                .as_deref()
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| "(unknown)".into());
+            let entry = by_user.entry(key).or_default();
+            entry.count += 1;
+            entry.saved += r.saved_tokens;
+            entry.in_tokens += r.in_tokens;
+            entry.elapsed_ms += r.elapsed_ms;
+        }
+        let mut user_rows: Vec<(String, Agg)> = by_user.into_iter().collect();
+        user_rows.sort_by(|a, b| b.1.saved.cmp(&a.1.saved));
+        for (u, a) in user_rows.iter().take(top) {
+            let avg = if a.in_tokens == 0 {
+                0.0
+            } else {
+                (a.saved as f64 / a.in_tokens as f64) * 100.0
+            };
+            writeln!(
+                out,
+                "| {} | {} | {} | {:.1}% |",
+                u,
+                a.count,
+                humanize(a.saved),
+                avg
+            )
+            .ok();
+        }
+    }
+
     out
 }
 

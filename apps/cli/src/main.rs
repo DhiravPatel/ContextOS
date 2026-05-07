@@ -287,6 +287,7 @@ fn run_optimize(
         project: std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().into_owned()),
+        user: None,
     });
 
     // One-line per-call summary on stderr so the user sees what the

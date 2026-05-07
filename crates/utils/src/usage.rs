@@ -53,6 +53,49 @@ pub struct UsageRecord {
     /// "the project"). May be `None` for graph-free CLI invocations.
     #[serde(default)]
     pub project: Option<String>,
+    /// Identity of the human who made this call. Resolved at record
+    /// time from `$CONTEXTOS_USER`, then `git config user.email`, then
+    /// `$USER` / `whoami`. Optional so older log lines (written before
+    /// this field existed) keep deserializing.
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+/// Best-effort identity for the current OS user. Used to attribute log
+/// records when several teammates share one Claude account.
+pub fn current_user() -> Option<String> {
+    if let Ok(v) = std::env::var("CONTEXTOS_USER") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["config", "--get", "user.email"])
+        .output()
+    {
+        if out.status.success() {
+            let email = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !email.is_empty() {
+                return Some(email);
+            }
+        }
+    }
+    if let Ok(v) = std::env::var("USER") {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    if let Ok(out) = std::process::Command::new("whoami").output() {
+        if out.status.success() {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 /// Default global log path: `~/.contextos/usage.jsonl`.
@@ -83,6 +126,9 @@ pub fn record(mut rec: UsageRecord) {
         if q.len() > 200 {
             q.truncate(200);
         }
+    }
+    if rec.user.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        rec.user = current_user();
     }
     if let Err(e) = write_record(&rec) {
         eprintln!("contextos: usage log write failed: {e}");
@@ -149,6 +195,7 @@ mod tests {
             chunks_out: 2,
             source: "cli".into(),
             project: Some("/tmp/x".into()),
+            user: Some("alice".into()),
         };
         // Manual write to bypass HOME resolution
         std::fs::write(&path, format!("{}\n", serde_json::to_string(&r).unwrap())).unwrap();
@@ -173,6 +220,7 @@ mod tests {
             chunks_out: 0,
             source: String::new(),
             project: None,
+            user: None,
         })
         .unwrap();
         std::fs::write(&path, format!("{good}\n{{ not json\n{good}\n")).unwrap();
