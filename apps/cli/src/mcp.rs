@@ -361,7 +361,7 @@ fn humanize(n: usize) -> String {
 /// progress bars made from `█`/`░`, and a top-commands table. The
 /// chat panel renders this inline; we can't trigger a real modal —
 /// MCP / slash commands have no UI surface beyond returning text.
-fn render_savings(project_root: &Path, project_filter: Option<&str>, top: usize) -> String {
+fn render_savings(_project_root: &Path, project_filter: Option<&str>, top: usize) -> String {
     let records = contextos_utils::read_usage();
     let filtered: Vec<&contextos_utils::UsageRecord> = records
         .iter()
@@ -381,20 +381,6 @@ fn render_savings(project_root: &Path, project_filter: Option<&str>, top: usize)
     use std::fmt::Write;
     let mut out = String::new();
     writeln!(out, "## ⚡ ContextOS — Token Savings  ·  *{scope_label}*").ok();
-    writeln!(out).ok();
-
-    // ACCOUNT section — installer / version / project info, like the
-    // top of the Account & Usage modal.
-    writeln!(out, "### ACCOUNT").ok();
-    writeln!(out).ok();
-    let bin_path = std::env::current_exe()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "(unknown)".into());
-    writeln!(out, "| | |").ok();
-    writeln!(out, "|---|---|").ok();
-    writeln!(out, "| Binary | `{}` |", bin_path).ok();
-    writeln!(out, "| Version | `{}` |", env!("CARGO_PKG_VERSION")).ok();
-    writeln!(out, "| Project | `{}` |", project_root.display()).ok();
     writeln!(out).ok();
 
     // USAGE section.
