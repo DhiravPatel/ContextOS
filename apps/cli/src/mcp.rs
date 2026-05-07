@@ -273,7 +273,7 @@ fn call_tool(graph: &Graph, _root: &Path, params: &Value) -> anyhow::Result<Valu
             } else {
                 None
             };
-            Ok(wrap_text(&render_savings(project.as_deref(), top)))
+            Ok(wrap_text(&render_savings(&graph.root, project.as_deref(), top)))
         }
         "build_graph" => {
             let r = graph.builder().build()?;
@@ -356,10 +356,12 @@ fn humanize(n: usize) -> String {
     }
 }
 
-/// Render the savings dashboard as plain text suitable for MCP tool
-/// output. No ANSI colours — Claude Code's tool panel renders the text
-/// as Markdown/plaintext, and ANSI escapes would just be visual noise.
-fn render_savings(project_filter: Option<&str>, top: usize) -> String {
+/// Render the savings dashboard as Markdown styled to mimic Claude
+/// Code's built-in "Account & Usage" modal: ACCOUNT and USAGE sections,
+/// progress bars made from `█`/`░`, and a top-commands table. The
+/// chat panel renders this inline; we can't trigger a real modal —
+/// MCP / slash commands have no UI surface beyond returning text.
+fn render_savings(project_root: &Path, project_filter: Option<&str>, top: usize) -> String {
     let records = contextos_utils::read_usage();
     let filtered: Vec<&contextos_utils::UsageRecord> = records
         .iter()
@@ -370,8 +372,42 @@ fn render_savings(project_filter: Option<&str>, top: usize) -> String {
         })
         .collect();
 
+    let scope_label = if project_filter.is_some() {
+        "Project Scope"
+    } else {
+        "Global Scope"
+    };
+
+    use std::fmt::Write;
+    let mut out = String::new();
+    writeln!(out, "## ⚡ ContextOS — Token Savings  ·  *{scope_label}*").ok();
+    writeln!(out).ok();
+
+    // ACCOUNT section — installer / version / project info, like the
+    // top of the Account & Usage modal.
+    writeln!(out, "### ACCOUNT").ok();
+    writeln!(out).ok();
+    let bin_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "(unknown)".into());
+    writeln!(out, "| | |").ok();
+    writeln!(out, "|---|---|").ok();
+    writeln!(out, "| Binary | `{}` |", bin_path).ok();
+    writeln!(out, "| Version | `{}` |", env!("CARGO_PKG_VERSION")).ok();
+    writeln!(out, "| Project | `{}` |", project_root.display()).ok();
+    writeln!(out).ok();
+
+    // USAGE section.
+    writeln!(out, "### USAGE").ok();
+    writeln!(out).ok();
+
     if filtered.is_empty() {
-        return "No ContextOS usage data yet. Once a few `optimize` tool calls have run, this dashboard fills in.".into();
+        writeln!(
+            out,
+            "_No usage data yet. Run a few `optimize` calls (or use ContextOS via Claude Code MCP), then check back._"
+        )
+        .ok();
+        return out;
     }
 
     let total_count = filtered.len();
@@ -380,43 +416,60 @@ fn render_savings(project_filter: Option<&str>, top: usize) -> String {
     let total_saved: usize = filtered.iter().map(|r| r.saved_tokens).sum();
     let total_elapsed_ms: f64 = filtered.iter().map(|r| r.elapsed_ms).sum();
     let avg_elapsed_ms = total_elapsed_ms / total_count as f64;
-    let pct = if total_in == 0 {
+    let aggregate_pct = if total_in == 0 {
         0.0
     } else {
         (total_saved as f64 / total_in as f64) * 100.0
     };
-    let scope_label = if project_filter.is_some() {
-        "Project Scope"
+    // Per-call mean reduction: average of per-call percentages, not
+    // weighted by call size. Useful when one big call would otherwise
+    // dominate the aggregate number.
+    let avg_call_pct: f64 = if filtered.is_empty() {
+        0.0
     } else {
-        "Global Scope"
+        let s: f64 = filtered
+            .iter()
+            .map(|r| {
+                if r.in_tokens == 0 {
+                    0.0
+                } else {
+                    (r.saved_tokens as f64 / r.in_tokens as f64) * 100.0
+                }
+            })
+            .sum();
+        s / filtered.len() as f64
     };
 
-    let mut out = String::new();
-    use std::fmt::Write;
-    writeln!(out, "## ContextOS Token Savings ({scope_label})").ok();
-    writeln!(out).ok();
-    writeln!(out, "- **Total commands:** {}", total_count).ok();
-    writeln!(out, "- **Input tokens:** {}", humanize(total_in)).ok();
-    writeln!(out, "- **Output tokens:** {}", humanize(total_out)).ok();
     writeln!(
         out,
-        "- **Tokens saved:** {} ({:.1}%)",
+        "**Tokens saved**  ·  {} of {} input  ·  output {}",
         humanize(total_saved),
-        pct
+        humanize(total_in),
+        humanize(total_out)
     )
     .ok();
+    writeln!(out, "{}", progress_bar(aggregate_pct, 36)).ok();
+    writeln!(out).ok();
+
+    writeln!(out, "**Avg reduction per call**").ok();
+    writeln!(out, "{}", progress_bar(avg_call_pct, 36)).ok();
+    writeln!(out).ok();
+
     writeln!(
         out,
-        "- **Total exec time:** {} (avg {})",
+        "**Total exec time**  ·  {}  (avg {} per call · {} calls)",
         format_ms(total_elapsed_ms),
-        format_ms(avg_elapsed_ms)
+        format_ms(avg_elapsed_ms),
+        total_count
     )
     .ok();
     writeln!(out).ok();
-    writeln!(out, "### By Command").ok();
+
+    // TOP COMMANDS section.
+    writeln!(out, "### TOP COMMANDS").ok();
     writeln!(out).ok();
-    writeln!(out, "| # | Command | Count | Saved | Avg% | Time |").ok();
-    writeln!(out, "|---|---|---|---|---|---|").ok();
+    writeln!(out, "| # | Command | Count | Saved | Avg % | Time |").ok();
+    writeln!(out, "|---|---|---:|---:|---:|---:|").ok();
 
     use std::collections::HashMap;
     #[derive(Default)]
@@ -449,7 +502,12 @@ fn render_savings(project_filter: Option<&str>, top: usize) -> String {
         } else {
             (a.saved as f64 / a.in_tokens as f64) * 100.0
         };
-        let cmd = if q.len() > 40 { format!("{}…", &q[..39]) } else { q.clone() };
+        let cmd = if q.chars().count() > 36 {
+            let cut: String = q.chars().take(35).collect();
+            format!("{cut}…")
+        } else {
+            q.clone()
+        };
         writeln!(
             out,
             "| {} | {} | {} | {} | {:.1}% | {} |",
@@ -463,6 +521,18 @@ fn render_savings(project_filter: Option<&str>, top: usize) -> String {
         .ok();
     }
     out
+}
+
+/// Unicode progress bar with trailing percent label. Width = visible
+/// glyphs; the actual byte length is larger because each glyph is
+/// multi-byte UTF-8. The result is wrapped in a code span so chat
+/// renderers use a monospaced font (otherwise the proportional font
+/// makes the bar uneven).
+fn progress_bar(pct: f64, width: usize) -> String {
+    let pct_clamped = pct.clamp(0.0, 100.0);
+    let filled = ((pct_clamped / 100.0) * width as f64).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!("`{}{}`  **{:.1}%**", "█".repeat(filled), "░".repeat(empty), pct_clamped)
 }
 
 fn format_ms(ms: f64) -> String {
