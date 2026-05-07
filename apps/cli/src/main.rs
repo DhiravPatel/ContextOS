@@ -289,6 +289,18 @@ fn run_optimize(
             .map(|p| p.to_string_lossy().into_owned()),
     });
 
+    // One-line per-call summary on stderr so the user sees what the
+    // pipeline did. stdout still gets the full JSON, so this doesn't
+    // break consumers that pipe `contextos optimize` into `jq` etc.
+    eprintln!(
+        "ContextOS: {} → {} tokens (−{:.1}%, saved {} in {:.0}ms)",
+        humanize(result.original_tokens),
+        humanize(result.final_tokens),
+        result.reduction_pct,
+        humanize(result.tokens_saved),
+        result.elapsed_ms,
+    );
+
     let serialized = if pretty {
         serde_json::to_string_pretty(&result)?
     } else {

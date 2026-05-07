@@ -191,6 +191,17 @@ fn tools_list() -> Value {
                 "name": "graph_stats",
                 "description": "Node / edge / file counts in the current graph.",
                 "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "savings",
+                "description": "Show the cumulative ContextOS token-savings dashboard for this session: total tokens saved, average reduction %, per-query breakdown. Reads from the local usage log written by every optimize call.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "scope": { "type": "string", "enum": ["global", "project"], "default": "global" },
+                        "top": { "type": "integer", "default": 10 }
+                    }
+                }
             }
         ]
     })
@@ -232,7 +243,37 @@ fn call_tool(graph: &Graph, _root: &Path, params: &Value) -> anyhow::Result<Valu
                 source: "mcp".into(),
                 project: Some(graph.root.to_string_lossy().into_owned()),
             });
-            Ok(wrap_text(&serde_json::to_string_pretty(&result)?))
+            // Prepend a one-line human-readable summary so Claude Code's
+            // tool-output panel surfaces savings without the user having
+            // to ask. The full result JSON follows for the LLM to
+            // consume.
+            let summary = format!(
+                "ContextOS: {} → {} tokens (−{:.1}%, saved {} in {:.0}ms)\n\n",
+                humanize(result.original_tokens),
+                humanize(result.final_tokens),
+                result.reduction_pct,
+                humanize(result.tokens_saved),
+                result.elapsed_ms,
+            );
+            let body = serde_json::to_string_pretty(&result)?;
+            Ok(wrap_text(&format!("{summary}{body}")))
+        }
+        "savings" => {
+            let scope = args
+                .get("scope")
+                .and_then(Value::as_str)
+                .unwrap_or("global");
+            let top = args
+                .get("top")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(10);
+            let project = if scope == "project" {
+                Some(graph.root.to_string_lossy().into_owned())
+            } else {
+                None
+            };
+            Ok(wrap_text(&render_savings(project.as_deref(), top)))
         }
         "build_graph" => {
             let r = graph.builder().build()?;
@@ -302,4 +343,132 @@ fn wrap_text(s: &str) -> Value {
             { "type": "text", "text": s }
         ]
     })
+}
+
+/// Compact number formatter: 1234 → "1.2K", 1500000 → "1.5M".
+fn humanize(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Render the savings dashboard as plain text suitable for MCP tool
+/// output. No ANSI colours — Claude Code's tool panel renders the text
+/// as Markdown/plaintext, and ANSI escapes would just be visual noise.
+fn render_savings(project_filter: Option<&str>, top: usize) -> String {
+    let records = contextos_utils::read_usage();
+    let filtered: Vec<&contextos_utils::UsageRecord> = records
+        .iter()
+        .filter(|r| match (project_filter, &r.project) {
+            (Some(want), Some(got)) => got == want,
+            (Some(_), None) => false,
+            _ => true,
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        return "No ContextOS usage data yet. Once a few `optimize` tool calls have run, this dashboard fills in.".into();
+    }
+
+    let total_count = filtered.len();
+    let total_in: usize = filtered.iter().map(|r| r.in_tokens).sum();
+    let total_out: usize = filtered.iter().map(|r| r.out_tokens).sum();
+    let total_saved: usize = filtered.iter().map(|r| r.saved_tokens).sum();
+    let total_elapsed_ms: f64 = filtered.iter().map(|r| r.elapsed_ms).sum();
+    let avg_elapsed_ms = total_elapsed_ms / total_count as f64;
+    let pct = if total_in == 0 {
+        0.0
+    } else {
+        (total_saved as f64 / total_in as f64) * 100.0
+    };
+    let scope_label = if project_filter.is_some() {
+        "Project Scope"
+    } else {
+        "Global Scope"
+    };
+
+    let mut out = String::new();
+    use std::fmt::Write;
+    writeln!(out, "## ContextOS Token Savings ({scope_label})").ok();
+    writeln!(out).ok();
+    writeln!(out, "- **Total commands:** {}", total_count).ok();
+    writeln!(out, "- **Input tokens:** {}", humanize(total_in)).ok();
+    writeln!(out, "- **Output tokens:** {}", humanize(total_out)).ok();
+    writeln!(
+        out,
+        "- **Tokens saved:** {} ({:.1}%)",
+        humanize(total_saved),
+        pct
+    )
+    .ok();
+    writeln!(
+        out,
+        "- **Total exec time:** {} (avg {})",
+        format_ms(total_elapsed_ms),
+        format_ms(avg_elapsed_ms)
+    )
+    .ok();
+    writeln!(out).ok();
+    writeln!(out, "### By Command").ok();
+    writeln!(out).ok();
+    writeln!(out, "| # | Command | Count | Saved | Avg% | Time |").ok();
+    writeln!(out, "|---|---|---|---|---|---|").ok();
+
+    use std::collections::HashMap;
+    #[derive(Default)]
+    struct Agg {
+        count: usize,
+        saved: usize,
+        in_tokens: usize,
+        elapsed_ms: f64,
+    }
+    let mut by_query: HashMap<String, Agg> = HashMap::new();
+    for r in &filtered {
+        let key = r
+            .query
+            .as_deref()
+            .map(|q| q.trim().to_string())
+            .filter(|q| !q.is_empty())
+            .unwrap_or_else(|| "(no query)".into());
+        let entry = by_query.entry(key).or_default();
+        entry.count += 1;
+        entry.saved += r.saved_tokens;
+        entry.in_tokens += r.in_tokens;
+        entry.elapsed_ms += r.elapsed_ms;
+    }
+    let mut rows: Vec<(String, Agg)> = by_query.into_iter().collect();
+    rows.sort_by(|a, b| b.1.saved.cmp(&a.1.saved));
+
+    for (i, (q, a)) in rows.iter().take(top).enumerate() {
+        let avg = if a.in_tokens == 0 {
+            0.0
+        } else {
+            (a.saved as f64 / a.in_tokens as f64) * 100.0
+        };
+        let cmd = if q.len() > 40 { format!("{}…", &q[..39]) } else { q.clone() };
+        writeln!(
+            out,
+            "| {} | {} | {} | {} | {:.1}% | {} |",
+            i + 1,
+            cmd,
+            a.count,
+            humanize(a.saved),
+            avg,
+            format_ms(a.elapsed_ms)
+        )
+        .ok();
+    }
+    out
+}
+
+fn format_ms(ms: f64) -> String {
+    if ms >= 1_000.0 {
+        format!("{:.1}s", ms / 1_000.0)
+    } else {
+        format!("{:.0}ms", ms)
+    }
 }
