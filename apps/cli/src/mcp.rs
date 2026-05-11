@@ -18,6 +18,7 @@
 //! without the extension layer in the way.
 
 use anyhow::Result;
+use contextos_core_engine::types::InputChunk;
 use contextos_core_engine::{Engine, EngineConfig, OptimizationRequest};
 use contextos_graph::Graph;
 use serde::{Deserialize, Serialize};
@@ -180,11 +181,24 @@ fn tools_list() -> Value {
             },
             {
                 "name": "skeleton",
-                "description": "Signature-only view of a source file — function/class declarations without bodies.",
+                "description": "Signature-only view of a source file — function/class declarations without bodies. Prefer this over Read when you only need the structure of a large file (saves 70-90% tokens).",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "path": { "type": "string" } },
                     "required": ["path"]
+                }
+            },
+            {
+                "name": "cx_pack_files",
+                "description": "Read multiple source files, run them through the ContextOS optimization pipeline (dedup + rank + budget), and return a token-efficient packed view tuned to `query`. Prefer this over multiple Read calls when you need context from 3+ related files. Saves ~30-60% tokens vs raw reads.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "paths": { "type": "array", "items": { "type": "string" } },
+                        "query": { "type": "string" },
+                        "max_tokens": { "type": "integer", "default": 8000 }
+                    },
+                    "required": ["paths"]
                 }
             },
             {
@@ -321,12 +335,156 @@ fn call_tool(graph: &Graph, _root: &Path, params: &Value) -> anyhow::Result<Valu
             });
             Ok(wrap_text(&serde_json::to_string_pretty(&payload)?))
         }
+        "cx_pack_files" => {
+            let paths: Vec<String> = args
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            if paths.is_empty() {
+                anyhow::bail!("paths must be a non-empty array");
+            }
+            let query = args.get("query").and_then(Value::as_str).map(String::from);
+            let max_tokens = args
+                .get("max_tokens")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize)
+                .unwrap_or(8_000);
+
+            // Read each path off disk (relative paths resolved against
+            // the graph root). Files we can't read are skipped with a
+            // note in the output rather than failing the whole call —
+            // partial context beats no context.
+            let started = std::time::Instant::now();
+            let mut chunks: Vec<InputChunk> = Vec::with_capacity(paths.len());
+            let mut missing: Vec<String> = Vec::new();
+            for p in &paths {
+                let abs = if Path::new(p).is_absolute() {
+                    PathBuf::from(p)
+                } else {
+                    graph.root.join(p)
+                };
+                match std::fs::read_to_string(&abs) {
+                    Ok(content) => chunks.push(InputChunk {
+                        id: p.clone(),
+                        path: Some(p.clone()),
+                        language: contextos_utils::Language::Unknown,
+                        content,
+                        kind: Default::default(),
+                        priority: 0,
+                        skeleton_hint: false,
+                        community: None,
+                    }),
+                    Err(_) => missing.push(p.clone()),
+                }
+            }
+            if chunks.is_empty() {
+                anyhow::bail!(
+                    "could not read any of the requested paths (missing: {})",
+                    missing.join(", ")
+                );
+            }
+
+            let chunks_in = chunks.len();
+            let original_tokens: usize = chunks
+                .iter()
+                .map(|c| contextos_tokenizer::estimate_tokens(&c.content))
+                .sum();
+
+            let mut cfg = EngineConfig::default();
+            cfg.max_tokens = max_tokens;
+            let request = OptimizationRequest {
+                chunks,
+                query: query.clone(),
+            };
+            let result = Engine::new(cfg).optimize(request);
+
+            // Stitch the kept chunks back into a single text payload
+            // delimited by per-file headers so Claude can still tell
+            // where each piece came from.
+            let mut packed = String::new();
+            for c in &result.chunks {
+                packed.push_str("// ── ");
+                packed.push_str(c.path.as_deref().unwrap_or(&c.id));
+                packed.push_str(" ──\n");
+                packed.push_str(&c.content);
+                if !c.content.ends_with('\n') {
+                    packed.push('\n');
+                }
+                packed.push('\n');
+            }
+            if !missing.is_empty() {
+                packed.push_str(&format!(
+                    "\n// (skipped — could not read: {})\n",
+                    missing.join(", ")
+                ));
+            }
+
+            contextos_utils::record_usage(contextos_utils::UsageRecord {
+                ts: 0,
+                in_tokens: original_tokens,
+                out_tokens: result.final_tokens,
+                saved_tokens: original_tokens.saturating_sub(result.final_tokens),
+                elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+                query,
+                chunks_in,
+                chunks_out: result.chunks.len(),
+                source: "mcp.cx_pack_files".into(),
+                project: Some(graph.root.to_string_lossy().into_owned()),
+                user: None,
+            });
+
+            // Prepend a one-line summary so Claude Code's tool panel
+            // shows the saving without an extra round-trip.
+            let summary = format!(
+                "ContextOS packed {} files: {} → {} tokens (−{:.1}%, saved {} in {:.0}ms)\n\n",
+                chunks_in,
+                humanize(original_tokens),
+                humanize(result.final_tokens),
+                if original_tokens == 0 {
+                    0.0
+                } else {
+                    (1.0 - result.final_tokens as f64 / original_tokens as f64) * 100.0
+                },
+                humanize(original_tokens.saturating_sub(result.final_tokens)),
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            Ok(wrap_text(&format!("{summary}{packed}")))
+        }
         "skeleton" => {
             let path = args
                 .get("path")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("path required"))?;
+            let started = std::time::Instant::now();
             let sk = graph.query().skeleton_for(path)?;
+            // Estimate the would-be cost of the full file vs. the
+            // skeleton, so the savings dashboard reflects what Claude
+            // would have spent on a raw `Read`. Falls back to 0 if the
+            // file can't be read (e.g., generated path) — record is
+            // still emitted so the call shows up.
+            let abs = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                graph.root.join(path)
+            };
+            let original_bytes = std::fs::read_to_string(&abs).unwrap_or_default();
+            let original_tokens = contextos_tokenizer::estimate_tokens(&original_bytes);
+            let final_tokens = contextos_tokenizer::estimate_tokens(&sk);
+            let saved = original_tokens.saturating_sub(final_tokens);
+            contextos_utils::record_usage(contextos_utils::UsageRecord {
+                ts: 0,
+                in_tokens: original_tokens,
+                out_tokens: final_tokens,
+                saved_tokens: saved,
+                elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+                query: Some(format!("skeleton {path}")),
+                chunks_in: if original_tokens > 0 { 1 } else { 0 },
+                chunks_out: if final_tokens > 0 { 1 } else { 0 },
+                source: "mcp.skeleton".into(),
+                project: Some(graph.root.to_string_lossy().into_owned()),
+                user: None,
+            });
             Ok(wrap_text(&sk))
         }
         "graph_stats" => {

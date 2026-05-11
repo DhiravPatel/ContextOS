@@ -160,6 +160,176 @@ const KNOWN_MARKERS: &[&str] = &[
     "contextos:slash-command:savings v1",
 ];
 
+/// Append (or refresh) a ContextOS guidance block in the project's
+/// `CLAUDE.md`. This is the soft enforcement layer — Claude reads
+/// `CLAUDE.md` at session start and uses it as durable instruction.
+/// The block tells Claude when to prefer the ContextOS MCP tools
+/// (`skeleton`, `cx_pack_files`) over raw `Read` calls so token
+/// savings actually accrue during normal use.
+///
+/// Idempotent: the block is fenced with HTML markers, so on re-run we
+/// either skip (already current) or replace in place. Never touches
+/// the user's own content outside the fence.
+pub fn ensure_claude_md(root: &Path) -> Result<bool> {
+    let abs_root = root
+        .canonicalize()
+        .with_context(|| format!("resolving {}", root.display()))?;
+    let path = abs_root.join("CLAUDE.md");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let block = CONTEXTOS_CLAUDE_MD_BLOCK;
+
+    // If our current block is already verbatim in the file, no-op.
+    if existing.contains(block) {
+        return Ok(false);
+    }
+
+    // If an older version of our block exists (any line between the
+    // OPEN and CLOSE markers), replace it. Otherwise append.
+    let new_text = if let (Some(start), Some(end)) = (
+        existing.find(CLAUDE_MD_OPEN_MARKER),
+        existing.find(CLAUDE_MD_CLOSE_MARKER),
+    ) {
+        let end_full = end + CLAUDE_MD_CLOSE_MARKER.len();
+        if end_full < existing.len() {
+            let mut s = String::with_capacity(existing.len() + block.len());
+            s.push_str(&existing[..start]);
+            s.push_str(block);
+            s.push_str(&existing[end_full..]);
+            s
+        } else {
+            let mut s = String::with_capacity(existing.len() + block.len());
+            s.push_str(&existing[..start]);
+            s.push_str(block);
+            s
+        }
+    } else {
+        let mut s = existing.clone();
+        if !s.is_empty() && !s.ends_with('\n') {
+            s.push('\n');
+        }
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s.push_str(block);
+        s
+    };
+
+    std::fs::write(&path, new_text)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+const CLAUDE_MD_OPEN_MARKER: &str = "<!-- contextos:claude-md:begin -->";
+const CLAUDE_MD_CLOSE_MARKER: &str = "<!-- contextos:claude-md:end -->";
+
+/// Strict-mode enforcement: register a `PreToolUse` hook in
+/// `.claude/settings.json` that intercepts every `Read` call. The hook
+/// invokes `contextos hook pre-read` with the tool input on stdin; if
+/// the file is large enough to be wasteful the hook responds with a
+/// `decision: block` and a reason instructing Claude to use
+/// `mcp__contextos__cx_pack_files` or `skeleton` instead.
+///
+/// Idempotent: re-running with the same binary path is a no-op. If the
+/// settings file exists with other entries, ours is merged in without
+/// touching unrelated keys.
+pub fn ensure_strict_hook(root: &Path) -> Result<bool> {
+    let abs_root = root
+        .canonicalize()
+        .with_context(|| format!("resolving {}", root.display()))?;
+    let path = abs_root.join(".claude").join("settings.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let bin = binary_path();
+    let command = format!("{bin} hook pre-read");
+
+    let mut doc = read_json_or_default(&path)?;
+    let obj = doc
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} is not a JSON object", path.display()))?;
+
+    let hooks = obj
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("settings.json `hooks` is not an object"))?;
+
+    let pretool = hooks
+        .entry("PreToolUse")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("settings.json `hooks.PreToolUse` is not an array"))?;
+
+    // Look for an existing entry that matches `Read` and contains our
+    // hook command. If found, we're already configured.
+    let mut already = false;
+    for entry in pretool.iter() {
+        if entry.get("matcher").and_then(Value::as_str) == Some("Read") {
+            if let Some(arr) = entry.get("hooks").and_then(Value::as_array) {
+                for h in arr {
+                    if h.get("command").and_then(Value::as_str) == Some(&command) {
+                        already = true;
+                    }
+                }
+            }
+        }
+    }
+    if already {
+        return Ok(false);
+    }
+
+    pretool.push(json!({
+        "matcher": "Read",
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+            }
+        ]
+    }));
+
+    let pretty = serde_json::to_string_pretty(&doc)?;
+    std::fs::write(&path, pretty)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+/// The CLAUDE.md fragment installed (or refreshed) by `ensure_claude_md`.
+/// Bump the version suffix in the markers if the body changes materially
+/// so existing installs get upgraded in place rather than appended.
+const CONTEXTOS_CLAUDE_MD_BLOCK: &str = r#"<!-- contextos:claude-md:begin -->
+## ContextOS — token-saving tools
+
+This project has ContextOS wired up via MCP. Prefer the following tools
+over raw file reads when they apply — they return the same information
+in far fewer tokens, and the savings accrue to `/savings`.
+
+- **`mcp__contextos__skeleton`** — signature-only view of one file
+  (function and class declarations, no bodies). Use when you need to
+  understand a file's *structure* but not its full implementation, e.g.
+  before deciding which functions to dive into. Saves ~70-90% tokens
+  vs `Read` on a typical source file.
+- **`mcp__contextos__cx_pack_files`** — read N related files at once,
+  ranked and budget-trimmed against a `query`. Use when you need
+  context across 3+ files for a task (e.g. "how is auth wired across
+  the API and middleware?") instead of issuing separate `Read` calls.
+  Saves ~30-60% tokens.
+- **`mcp__contextos__optimize`** — when you've already gathered code
+  chunks (from grep, search, or prior reads) and want them deduped,
+  ranked, and packed to a token budget before quoting them back.
+
+Continue using `Read` directly when:
+- The file is small (≤100 lines).
+- You need exact, unmodified bytes (e.g. before an `Edit`).
+- You need a specific narrow region you can address with `offset` /
+  `limit`.
+
+Run `/savings` at any time to see how much these tools have saved.
+<!-- contextos:claude-md:end -->
+"#;
+
 /// Slash command body. The YAML frontmatter MUST be at the very top of
 /// the file — Claude Code's parser scans for an opening `---` on line 1
 /// and won't recognise the file as a slash command otherwise. The
@@ -385,5 +555,95 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
         assert!(doc["mcpServers"]["other"].is_object());
         assert!(doc["mcpServers"].get("contextos").is_none());
+    }
+
+    #[test]
+    fn claude_md_appended_when_missing() {
+        let tmp = setup();
+        let path = tmp.path().join("CLAUDE.md");
+        // No CLAUDE.md yet — install should create one with our block.
+        let wrote = ensure_claude_md(tmp.path()).unwrap();
+        assert!(wrote);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains(CLAUDE_MD_OPEN_MARKER));
+        assert!(body.contains("cx_pack_files"));
+        assert!(body.contains(CLAUDE_MD_CLOSE_MARKER));
+    }
+
+    #[test]
+    fn claude_md_idempotent_second_run() {
+        let tmp = setup();
+        ensure_claude_md(tmp.path()).unwrap();
+        let after_first = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+        let wrote = ensure_claude_md(tmp.path()).unwrap();
+        assert!(!wrote, "second run should be a no-op");
+        let after_second = std::fs::read_to_string(tmp.path().join("CLAUDE.md")).unwrap();
+        assert_eq!(after_first, after_second);
+    }
+
+    #[test]
+    fn claude_md_preserves_user_content() {
+        let tmp = setup();
+        let path = tmp.path().join("CLAUDE.md");
+        std::fs::write(&path, "# My project\n\nHand-written notes.\n").unwrap();
+        ensure_claude_md(tmp.path()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("# My project"));
+        assert!(body.contains("Hand-written notes."));
+        assert!(body.contains(CLAUDE_MD_OPEN_MARKER));
+    }
+
+    #[test]
+    fn strict_hook_added_to_settings() {
+        let tmp = setup();
+        let added = ensure_strict_hook(tmp.path()).unwrap();
+        assert!(added);
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join(".claude").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        let pretool = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pretool.len(), 1);
+        assert_eq!(pretool[0]["matcher"], "Read");
+        let cmd = pretool[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.ends_with("hook pre-read"));
+    }
+
+    #[test]
+    fn strict_hook_idempotent() {
+        let tmp = setup();
+        assert!(ensure_strict_hook(tmp.path()).unwrap());
+        assert!(!ensure_strict_hook(tmp.path()).unwrap());
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join(".claude").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        // Should still have exactly one Read entry.
+        let pretool = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pretool.len(), 1);
+    }
+
+    #[test]
+    fn strict_hook_preserves_unrelated_settings() {
+        let tmp = setup();
+        let path = tmp.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"permissions":{"allow":["Bash"]},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+        )
+        .unwrap();
+        ensure_strict_hook(tmp.path()).unwrap();
+        let settings: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Unrelated permissions + the user's existing Bash hook are intact.
+        assert_eq!(settings["permissions"]["allow"][0], "Bash");
+        let pretool = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pretool.len(), 2);
+        let matchers: Vec<&str> = pretool
+            .iter()
+            .filter_map(|e| e["matcher"].as_str())
+            .collect();
+        assert!(matchers.contains(&"Bash"));
+        assert!(matchers.contains(&"Read"));
     }
 }

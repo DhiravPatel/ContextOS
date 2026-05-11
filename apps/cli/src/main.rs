@@ -11,6 +11,7 @@
 //!   stats        — graph stats from the current repo
 //!   version      — print CLI version
 
+mod hook;
 mod install;
 mod mcp;
 mod watch;
@@ -122,11 +123,29 @@ enum Cmd {
         /// run — Claude Code will index lazily on first MCP call.
         #[arg(long, default_value_t = false)]
         skip_build: bool,
+        /// Install the strict-enforcement PreToolUse hook that blocks
+        /// `Read` calls on large files and forces Claude to use the
+        /// ContextOS MCP tools instead. Off by default — the soft
+        /// CLAUDE.md nudge is usually enough.
+        #[arg(long, default_value_t = false)]
+        strict: bool,
     },
     /// Auto-configure Claude Code (writes .mcp.json + .claude/settings.local.json).
     Install {
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// See `init --strict`.
+        #[arg(long, default_value_t = false)]
+        strict: bool,
+    },
+    /// Hook entrypoint — invoked by Claude Code's PreToolUse hook when
+    /// strict mode is enabled. Reads a JSON payload on stdin, decides
+    /// whether to allow or block, and writes a JSON response to stdout.
+    /// Not intended for direct human use.
+    Hook {
+        /// Which hook event to handle. Today only `pre-read` is
+        /// supported (PreToolUse on the built-in `Read` tool).
+        kind: String,
     },
     /// Remove the ContextOS entries from .mcp.json + settings.
     Uninstall {
@@ -219,8 +238,9 @@ fn main() -> Result<()> {
         Cmd::Skeleton { root, path } => run_skeleton(&root, &path),
         Cmd::Watch { root } => watch::run(&root),
         Cmd::Serve { root } => mcp::serve(&root),
-        Cmd::Init { root, skip_build } => run_init(&root, skip_build),
-        Cmd::Install { root } => run_install(&root),
+        Cmd::Init { root, skip_build, strict } => run_init(&root, skip_build, strict),
+        Cmd::Install { root, strict } => run_install(&root, strict),
+        Cmd::Hook { kind } => run_hook(&kind),
         Cmd::Uninstall { root } => run_uninstall(&root),
         Cmd::Stats { root } => run_stats(&root),
         Cmd::Savings {
@@ -518,7 +538,7 @@ fn run_skeleton(root: &Path, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_install(root: &Path) -> Result<()> {
+fn run_install(root: &Path, strict: bool) -> Result<()> {
     let report = install::install(root)?;
     println!(
         "install: mcp_json={} settings={} already_configured={}",
@@ -526,13 +546,41 @@ fn run_install(root: &Path) -> Result<()> {
         report.settings_path.display(),
         report.already_configured
     );
+    if strict {
+        match install::ensure_strict_hook(root) {
+            Ok(true) => println!("install: strict PreToolUse hook installed"),
+            Ok(false) => println!("install: strict hook already configured"),
+            Err(e) => eprintln!("install: strict hook setup failed: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Hook entrypoint. Reads a Claude Code hook JSON payload from stdin,
+/// decides whether to block or allow, writes a JSON response to stdout
+/// and returns 0. Stays self-contained — no graph open, no I/O beyond
+/// stdin/stdout — so that hook latency stays sub-millisecond.
+fn run_hook(kind: &str) -> Result<()> {
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf)?;
+    let response = match kind {
+        "pre-read" => hook::handle_pre_read(&buf),
+        other => {
+            // Unknown hook kinds are passed through (fail-open). Better
+            // than silently breaking Claude Code's tool flow.
+            eprintln!("contextos: unknown hook kind {other}, allowing");
+            serde_json::json!({})
+        }
+    };
+    println!("{}", response);
     Ok(())
 }
 
 /// Single-command setup: index the repo and wire Claude Code in one shot.
 /// Used by `install.sh` so `curl … | bash` from inside a project directory
 /// leaves the user with a fully-functional setup, no follow-up commands.
-fn run_init(root: &Path, skip_build: bool) -> Result<()> {
+fn run_init(root: &Path, skip_build: bool, strict: bool) -> Result<()> {
     if !skip_build {
         eprintln!("ContextOS init [1/2] indexing repo at {}…", root.display());
         let graph = Graph::open(root)?;
@@ -573,6 +621,26 @@ fn run_init(root: &Path, skip_build: bool) -> Result<()> {
         ),
         Ok(false) => {}
         Err(e) => eprintln!("  slash command install skipped: {e}"),
+    }
+    // Refresh the CLAUDE.md guidance block so the LLM is nudged
+    // toward `skeleton` / `cx_pack_files` over raw `Read`. This is
+    // the soft enforcement layer — without it the MCP tools sit
+    // installed but unused.
+    match install::ensure_claude_md(root) {
+        Ok(true) => eprintln!(
+            "  refreshed ContextOS guidance block in CLAUDE.md"
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("  CLAUDE.md update skipped: {e}"),
+    }
+    if strict {
+        match install::ensure_strict_hook(root) {
+            Ok(true) => eprintln!(
+                "  installed strict PreToolUse hook (large Read calls now redirect to ContextOS)"
+            ),
+            Ok(false) => {}
+            Err(e) => eprintln!("  strict hook setup skipped: {e}"),
+        }
     }
     eprintln!();
     eprintln!(
