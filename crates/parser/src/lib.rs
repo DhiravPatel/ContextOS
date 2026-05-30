@@ -99,18 +99,51 @@ static RE_PRINTLN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?m)^\s*println!\s*\([^;\n]*\)\s*;?\s*$").unwrap());
 static RE_PY_PRINT: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?m)^\s*print\s*\([^)\n]*\)\s*$").unwrap());
+static RE_RUBY_BLOCK_COMMENT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?ms)^=begin.*?^=end\s*$").unwrap());
+/// `fmt.Println(...)` / `fmt.Printf(...)` / `log.Println(...)` etc.
+static RE_GO_PRINT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?m)^\s*(?:fmt|log)\.(?:Print(?:f|ln)?|Debug|Info|Trace)\s*\([^\n]*\)\s*$").unwrap()
+});
+/// `System.out.println(...)` / `System.err.println(...)`.
+static RE_JAVA_PRINT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?m)^\s*System\.(?:out|err)\.print(?:ln|f)?\s*\([^\n]*\)\s*;?\s*$").unwrap()
+});
+/// `puts ...` / `pp ...` / `p ...` — common Ruby debug prints. We
+/// require the call to occupy the whole line to avoid touching method
+/// bodies that genuinely return `puts`.
+static RE_RUBY_PRINT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?m)^\s*(?:puts|pp|p)\s+[^\n]+$").unwrap()
+});
+/// `printf(...)`, `fprintf(...)`, `std::cout << ...;`. C and C++
+/// debug-print idioms.
+static RE_C_PRINT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?m)^\s*(?:f?printf\s*\([^\n]*\)|std::cout\s*<<[^\n]*)\s*;?\s*$").unwrap()
+});
 
 fn regex_strip(source: &str, lang: Language, opts: StripOptions) -> String {
     let mut out = source.to_string();
 
     if opts.remove_comments {
         out = match lang {
-            Language::Rust | Language::TypeScript | Language::JavaScript => {
+            Language::Rust
+            | Language::TypeScript
+            | Language::JavaScript
+            | Language::Go
+            | Language::Java
+            | Language::CFamily => {
                 let s = RE_BLOCK_COMMENT.replace_all(&out, "").into_owned();
                 RE_LINE_COMMENT_SLASH.replace_all(&s, "").into_owned()
             }
             Language::Python => {
                 let s = RE_PY_DOCSTRING.replace_all(&out, "").into_owned();
+                RE_LINE_COMMENT_HASH.replace_all(&s, "").into_owned()
+            }
+            Language::Ruby => {
+                // Ruby has line comments via `#` and block comments
+                // via `=begin` / `=end`. Block form is rare in modern
+                // code, but stripping it is cheap.
+                let s = RE_RUBY_BLOCK_COMMENT.replace_all(&out, "").into_owned();
                 RE_LINE_COMMENT_HASH.replace_all(&s, "").into_owned()
             }
             _ => out,
@@ -124,6 +157,10 @@ fn regex_strip(source: &str, lang: Language, opts: StripOptions) -> String {
             }
             Language::Rust => RE_PRINTLN.replace_all(&out, "").into_owned(),
             Language::Python => RE_PY_PRINT.replace_all(&out, "").into_owned(),
+            Language::Go => RE_GO_PRINT.replace_all(&out, "").into_owned(),
+            Language::Java => RE_JAVA_PRINT.replace_all(&out, "").into_owned(),
+            Language::Ruby => RE_RUBY_PRINT.replace_all(&out, "").into_owned(),
+            Language::CFamily => RE_C_PRINT.replace_all(&out, "").into_owned(),
             _ => out,
         };
     }

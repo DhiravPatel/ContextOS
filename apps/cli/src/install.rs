@@ -243,7 +243,6 @@ pub fn ensure_strict_hook(root: &Path) -> Result<bool> {
     }
 
     let bin = binary_path();
-    let command = format!("{bin} hook pre-read");
 
     let mut doc = read_json_or_default(&path)?;
     let obj = doc
@@ -262,33 +261,47 @@ pub fn ensure_strict_hook(root: &Path) -> Result<bool> {
         .as_array_mut()
         .ok_or_else(|| anyhow::anyhow!("settings.json `hooks.PreToolUse` is not an array"))?;
 
-    // Look for an existing entry that matches `Read` and contains our
-    // hook command. If found, we're already configured.
-    let mut already = false;
-    for entry in pretool.iter() {
-        if entry.get("matcher").and_then(Value::as_str) == Some("Read") {
-            if let Some(arr) = entry.get("hooks").and_then(Value::as_array) {
-                for h in arr {
-                    if h.get("command").and_then(Value::as_str) == Some(&command) {
-                        already = true;
-                    }
-                }
-            }
+    // (matcher, hook kind) — one entry per tool we gate. Each registers
+    // a separate `PreToolUse` block; if the user already has any of
+    // them wired to our binary we skip that one.
+    let gates: &[(&str, &str)] = &[
+        ("Read", "pre-read"),
+        ("Grep", "pre-grep"),
+    ];
+
+    let mut changed = false;
+    for (matcher, kind) in gates {
+        let command = format!("{bin} hook {kind}");
+        let already = pretool.iter().any(|entry| {
+            entry.get("matcher").and_then(Value::as_str) == Some(*matcher)
+                && entry
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter().any(|h| {
+                            h.get("command").and_then(Value::as_str) == Some(&command)
+                        })
+                    })
+                    .unwrap_or(false)
+        });
+        if already {
+            continue;
         }
-    }
-    if already {
-        return Ok(false);
+        pretool.push(json!({
+            "matcher": matcher,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command,
+                }
+            ]
+        }));
+        changed = true;
     }
 
-    pretool.push(json!({
-        "matcher": "Read",
-        "hooks": [
-            {
-                "type": "command",
-                "command": command,
-            }
-        ]
-    }));
+    if !changed {
+        return Ok(false);
+    }
 
     let pretty = serde_json::to_string_pretty(&doc)?;
     std::fs::write(&path, pretty)
@@ -594,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_hook_added_to_settings() {
+    fn strict_hook_adds_read_and_grep_entries() {
         let tmp = setup();
         let added = ensure_strict_hook(tmp.path()).unwrap();
         assert!(added);
@@ -603,10 +616,20 @@ mod tests {
         )
         .unwrap();
         let pretool = settings["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pretool.len(), 1);
-        assert_eq!(pretool[0]["matcher"], "Read");
-        let cmd = pretool[0]["hooks"][0]["command"].as_str().unwrap();
-        assert!(cmd.ends_with("hook pre-read"));
+        assert_eq!(pretool.len(), 2, "expected entries for both Read and Grep");
+        let matchers: Vec<&str> = pretool
+            .iter()
+            .filter_map(|e| e["matcher"].as_str())
+            .collect();
+        assert!(matchers.contains(&"Read"));
+        assert!(matchers.contains(&"Grep"));
+        for e in pretool {
+            let cmd = e["hooks"][0]["command"].as_str().unwrap();
+            assert!(
+                cmd.contains("hook pre-read") || cmd.contains("hook pre-grep"),
+                "unexpected hook command {cmd}"
+            );
+        }
     }
 
     #[test]
@@ -618,9 +641,45 @@ mod tests {
             &std::fs::read_to_string(tmp.path().join(".claude").join("settings.json")).unwrap(),
         )
         .unwrap();
-        // Should still have exactly one Read entry.
+        // Still exactly the two entries we wrote — no duplicates.
         let pretool = settings["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pretool.len(), 1);
+        assert_eq!(pretool.len(), 2);
+    }
+
+    #[test]
+    fn strict_hook_partial_upgrade_only_adds_missing_entry() {
+        let tmp = setup();
+        // Simulate an older install that only had the Read hook
+        // wired up — we should add the Grep entry without touching it.
+        let bin = binary_path();
+        let path = tmp.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Read",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": format!("{bin} hook pre-read"),
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let added = ensure_strict_hook(tmp.path()).unwrap();
+        assert!(added, "upgrade should report a change");
+        let settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let pretool = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pretool.len(), 2);
     }
 
     #[test]
@@ -638,12 +697,13 @@ mod tests {
         // Unrelated permissions + the user's existing Bash hook are intact.
         assert_eq!(settings["permissions"]["allow"][0], "Bash");
         let pretool = settings["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pretool.len(), 2);
+        assert_eq!(pretool.len(), 3);
         let matchers: Vec<&str> = pretool
             .iter()
             .filter_map(|e| e["matcher"].as_str())
             .collect();
         assert!(matchers.contains(&"Bash"));
         assert!(matchers.contains(&"Read"));
+        assert!(matchers.contains(&"Grep"));
     }
 }

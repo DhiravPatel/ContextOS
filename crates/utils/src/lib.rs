@@ -20,6 +20,13 @@ pub enum Language {
     TypeScript,
     JavaScript,
     Python,
+    Go,
+    Java,
+    Ruby,
+    /// C, C++, and headers — they share comment syntax and the same
+    /// debug-print idioms (`printf` / `std::cout`), so one variant
+    /// covers them all for stripping purposes.
+    CFamily,
     Json,
     Markdown,
     Unknown,
@@ -32,6 +39,10 @@ impl Language {
             "ts" | "tsx" => Language::TypeScript,
             "js" | "jsx" | "mjs" | "cjs" => Language::JavaScript,
             "py" | "pyi" => Language::Python,
+            "go" => Language::Go,
+            "java" | "kt" | "kts" | "scala" => Language::Java,
+            "rb" | "rake" => Language::Ruby,
+            "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "hh" | "hxx" => Language::CFamily,
             "json" => Language::Json,
             "md" | "markdown" => Language::Markdown,
             _ => Language::Unknown,
@@ -49,8 +60,11 @@ impl Language {
         match self {
             Language::Rust
             | Language::TypeScript
-            | Language::JavaScript => &["//"],
-            Language::Python => &["#"],
+            | Language::JavaScript
+            | Language::Go
+            | Language::Java
+            | Language::CFamily => &["//"],
+            Language::Python | Language::Ruby => &["#"],
             Language::Json | Language::Markdown | Language::Unknown => &[],
         }
     }

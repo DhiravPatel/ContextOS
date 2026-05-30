@@ -566,6 +566,7 @@ fn run_hook(kind: &str) -> Result<()> {
     std::io::stdin().read_to_string(&mut buf)?;
     let response = match kind {
         "pre-read" => hook::handle_pre_read(&buf),
+        "pre-grep" => hook::handle_pre_grep(&buf),
         other => {
             // Unknown hook kinds are passed through (fail-open). Better
             // than silently breaking Claude Code's tool flow.

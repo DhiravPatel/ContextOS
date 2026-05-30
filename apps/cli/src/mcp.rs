@@ -368,7 +368,11 @@ fn call_tool(graph: &Graph, _root: &Path, params: &Value) -> anyhow::Result<Valu
                     Ok(content) => chunks.push(InputChunk {
                         id: p.clone(),
                         path: Some(p.clone()),
-                        language: contextos_utils::Language::Unknown,
+                        // Detect language from the path extension so
+                        // the parser-driven strip pass actually fires.
+                        // With `Unknown` the compress stage is a no-op
+                        // and we leave 10-30% reduction on the table.
+                        language: contextos_utils::Language::from_path(p),
                         content,
                         kind: Default::default(),
                         priority: 0,
@@ -434,22 +438,84 @@ fn call_tool(graph: &Graph, _root: &Path, params: &Value) -> anyhow::Result<Valu
                 user: None,
             });
 
-            // Prepend a one-line summary so Claude Code's tool panel
-            // shows the saving without an extra round-trip.
+            // Coverage signal: what fraction of the requested files
+            // (and of their original tokens) survived budgeting + rank.
+            // Claude uses this to decide whether the packed view is
+            // enough or whether to fall back to a targeted Read on the
+            // dropped files. Surfaced both in the human summary and as
+            // a structured trailing block.
+            let files_kept = result.chunks.len();
+            let file_coverage = if chunks_in == 0 {
+                1.0
+            } else {
+                files_kept as f64 / chunks_in as f64
+            };
+            let token_coverage = if original_tokens == 0 {
+                1.0
+            } else {
+                result.final_tokens as f64 / original_tokens as f64
+            };
+            let dropped_paths: Vec<String> = {
+                let kept: std::collections::HashSet<&str> = result
+                    .chunks
+                    .iter()
+                    .filter_map(|c| c.path.as_deref())
+                    .collect();
+                paths
+                    .iter()
+                    .filter(|p| !kept.contains(p.as_str()))
+                    .cloned()
+                    .collect()
+            };
+            let confidence_label = if file_coverage >= 0.9 {
+                "HIGH"
+            } else if file_coverage >= 0.5 {
+                "PARTIAL"
+            } else {
+                "LOW"
+            };
+
+            // Human summary at the top — what the tool-call panel
+            // shows. Coverage line is what makes this honest about
+            // information loss.
             let summary = format!(
-                "ContextOS packed {} files: {} → {} tokens (−{:.1}%, saved {} in {:.0}ms)\n\n",
-                chunks_in,
-                humanize(original_tokens),
-                humanize(result.final_tokens),
-                if original_tokens == 0 {
+                "ContextOS packed {kept}/{total} files: {orig} → {fin} tokens (−{pct:.1}%, saved {saved} in {ms:.0}ms)\n\
+                 Coverage: {confidence_label}  ·  {kept}/{total} files kept ({file_pct:.0}% of files, {tok_pct:.0}% of original tokens)\n\n",
+                kept = files_kept,
+                total = chunks_in,
+                orig = humanize(original_tokens),
+                fin = humanize(result.final_tokens),
+                pct = if original_tokens == 0 {
                     0.0
                 } else {
                     (1.0 - result.final_tokens as f64 / original_tokens as f64) * 100.0
                 },
-                humanize(original_tokens.saturating_sub(result.final_tokens)),
-                started.elapsed().as_secs_f64() * 1000.0,
+                saved = humanize(original_tokens.saturating_sub(result.final_tokens)),
+                ms = started.elapsed().as_secs_f64() * 1000.0,
+                confidence_label = confidence_label,
+                file_pct = file_coverage * 100.0,
+                tok_pct = token_coverage * 100.0,
             );
-            Ok(wrap_text(&format!("{summary}{packed}")))
+
+            // Structured trailer so an LLM (or another tool) can
+            // parse the dropped-file list deterministically rather
+            // than fuzzy-matching English. JSON is human-readable
+            // enough that the panel still looks fine.
+            let mut footer = String::new();
+            if !dropped_paths.is_empty() {
+                footer.push_str("\n// ── coverage ──\n");
+                footer.push_str(&serde_json::to_string_pretty(&json!({
+                    "files_kept": files_kept,
+                    "files_total": chunks_in,
+                    "file_coverage": file_coverage,
+                    "token_coverage": token_coverage,
+                    "confidence": confidence_label,
+                    "dropped_paths": dropped_paths,
+                })).unwrap_or_default());
+                footer.push('\n');
+            }
+
+            Ok(wrap_text(&format!("{summary}{packed}{footer}")))
         }
         "skeleton" => {
             let path = args
@@ -502,6 +568,54 @@ fn wrap_text(s: &str) -> Value {
             { "type": "text", "text": s }
         ]
     })
+}
+
+/// Convert tokens saved into estimated dollars, using Anthropic's
+/// public input-token price (savings only ever reduce **input** tokens —
+/// output is generated by the model, not packed by ContextOS).
+///
+/// Resolution order for the per-million-token rate:
+///   1. `CONTEXTOS_INPUT_PRICE_PER_M` (USD, float). For teams on
+///      enterprise pricing or routing through a gateway.
+///   2. `CONTEXTOS_PRICING_MODEL` selecting a built-in tier
+///      (`opus`, `sonnet`, `haiku`). Default `sonnet`.
+///
+/// Returns `(dollars, model_label, rate_per_million)`.
+fn estimate_dollars_saved(tokens_saved: usize) -> (f64, &'static str, f64) {
+    if let Ok(s) = std::env::var("CONTEXTOS_INPUT_PRICE_PER_M") {
+        if let Ok(r) = s.trim().parse::<f64>() {
+            let usd = (tokens_saved as f64 / 1_000_000.0) * r;
+            return (usd, "custom", r);
+        }
+    }
+    // Tiers picked to match Anthropic's published input pricing as of
+    // the v0.3.1 release; bump these when prices change. The `Sonnet`
+    // tier is the safe default — most Claude Code users are on Sonnet.
+    let (label, rate) = match std::env::var("CONTEXTOS_PRICING_MODEL")
+        .ok()
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("opus") => ("Opus", 15.0),
+        Some("haiku") => ("Haiku", 0.80),
+        _ => ("Sonnet", 3.0),
+    };
+    let usd = (tokens_saved as f64 / 1_000_000.0) * rate;
+    (usd, label, rate)
+}
+
+/// Render USD with a sensible number of decimal places.
+fn format_dollars(usd: f64) -> String {
+    if usd >= 1.0 {
+        format!("${:.2}", usd)
+    } else if usd >= 0.01 {
+        format!("${:.3}", usd)
+    } else if usd > 0.0 {
+        format!("${:.5}", usd)
+    } else {
+        "$0.00".into()
+    }
 }
 
 /// Compact number formatter: 1234 → "1.2K", 1500000 → "1.5M".
@@ -594,6 +708,17 @@ fn render_savings(_project_root: &Path, project_filter: Option<&str>, top: usize
     )
     .ok();
     writeln!(out, "{}", progress_bar(aggregate_pct, 36)).ok();
+    writeln!(out).ok();
+
+    let (dollars_saved, model_label, rate) = estimate_dollars_saved(total_saved);
+    writeln!(
+        out,
+        "**Estimated $ saved**  ·  {}  _({} input pricing, ${:.2}/M tokens — override with `CONTEXTOS_INPUT_PRICE_PER_M`)_",
+        format_dollars(dollars_saved),
+        model_label,
+        rate
+    )
+    .ok();
     writeln!(out).ok();
 
     writeln!(out, "**Avg reduction per call**").ok();
@@ -734,5 +859,63 @@ fn format_ms(ms: f64) -> String {
         format!("{:.1}s", ms / 1_000.0)
     } else {
         format!("{:.0}ms", ms)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // SAFETY: these tests touch process-wide env vars and therefore
+    // can't run in parallel. We serialise on a single test by setting
+    // both env vars in each one and clearing them at the end.
+
+    #[test]
+    fn pricing_defaults_to_sonnet() {
+        std::env::remove_var("CONTEXTOS_INPUT_PRICE_PER_M");
+        std::env::remove_var("CONTEXTOS_PRICING_MODEL");
+        let (usd, label, rate) = estimate_dollars_saved(1_000_000);
+        assert_eq!(label, "Sonnet");
+        assert!((rate - 3.0).abs() < 1e-9);
+        assert!((usd - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pricing_respects_model_env_var() {
+        std::env::remove_var("CONTEXTOS_INPUT_PRICE_PER_M");
+        std::env::set_var("CONTEXTOS_PRICING_MODEL", "opus");
+        let (usd, label, rate) = estimate_dollars_saved(100_000);
+        assert_eq!(label, "Opus");
+        assert!((rate - 15.0).abs() < 1e-9);
+        assert!((usd - 1.5).abs() < 1e-9);
+        std::env::remove_var("CONTEXTOS_PRICING_MODEL");
+    }
+
+    #[test]
+    fn pricing_respects_custom_rate_env_var() {
+        std::env::set_var("CONTEXTOS_INPUT_PRICE_PER_M", "2.5");
+        std::env::remove_var("CONTEXTOS_PRICING_MODEL");
+        let (usd, label, rate) = estimate_dollars_saved(2_000_000);
+        assert_eq!(label, "custom");
+        assert!((rate - 2.5).abs() < 1e-9);
+        assert!((usd - 5.0).abs() < 1e-9);
+        std::env::remove_var("CONTEXTOS_INPUT_PRICE_PER_M");
+    }
+
+    #[test]
+    fn pricing_handles_zero_tokens() {
+        std::env::remove_var("CONTEXTOS_INPUT_PRICE_PER_M");
+        std::env::remove_var("CONTEXTOS_PRICING_MODEL");
+        let (usd, _, _) = estimate_dollars_saved(0);
+        assert!(usd.abs() < 1e-9);
+    }
+
+    #[test]
+    fn dollar_formatter_picks_sensible_precision() {
+        assert_eq!(format_dollars(0.0), "$0.00");
+        assert_eq!(format_dollars(0.000_005), "$0.00001");
+        assert_eq!(format_dollars(0.05), "$0.050");
+        assert_eq!(format_dollars(1.23), "$1.23");
+        assert_eq!(format_dollars(150.0), "$150.00");
     }
 }
